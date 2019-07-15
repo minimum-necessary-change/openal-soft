@@ -133,9 +133,7 @@ const milliseconds AudioBufferTime{20};
 const milliseconds AudioBufferTotalTime{800};
 
 enum {
-    FF_UPDATE_EVENT = SDL_USEREVENT,
-    FF_REFRESH_EVENT,
-    FF_MOVIE_DONE_EVENT
+    FF_MOVIE_DONE_EVENT = SDL_USEREVENT
 };
 
 enum class SyncMaster {
@@ -333,49 +331,46 @@ struct VideoState {
 
     PacketQueue<14*1024*1024> mPackets;
 
-    nanoseconds mClock{0};
-    nanoseconds mFrameTimer{0};
-    nanoseconds mFrameLastPts{0};
-    nanoseconds mFrameLastDelay{0};
+    /* The expected pts of the next frame to decode. */
     nanoseconds mCurrentPts{0};
-    /* time (av_gettime) at which we updated mCurrentPts - used to have running video pts */
-    microseconds mCurrentPtsTime{0};
+    /* The pts of the currently displayed frame, and the time (av_gettime) it
+     * was last updated - used to have running video pts
+     */
+    nanoseconds mDisplayPts{0};
+    microseconds mDisplayPtsTime{microseconds::min()};
+    std::mutex mDispPtsMutex;
 
     /* Swscale context for format conversion */
     SwsContextPtr mSwscaleCtx;
 
     struct Picture {
-        SDL_Texture *mImage{nullptr};
-        int mWidth{0}, mHeight{0}; /* Logical image size (actual size may be larger) */
-        AVFramePtr mFrame{av_frame_alloc()};
-        nanoseconds mPts{0};
-
-        ~Picture()
-        {
-            if(mImage)
-                SDL_DestroyTexture(mImage);
-            mImage = nullptr;
-        }
+        AVFramePtr mFrame{};
+        nanoseconds mPts{nanoseconds::min()};
     };
     std::array<Picture,VIDEO_PICTURE_QUEUE_SIZE> mPictQ;
-    size_t mPictQSize{0}, mPictQRead{0}, mPictQWrite{0};
-    size_t mPictQPrepSize{0}, mPictQPrep{0};
+    std::atomic<size_t> mPictQRead{0u}, mPictQWrite{1u};
     std::mutex mPictQMutex;
     std::condition_variable mPictQCond;
+
+    SDL_Texture *mImage{nullptr};
+    int mWidth{0}, mHeight{0}; /* Logical image size (actual size may be larger) */
     bool mFirstUpdate{true};
+
     std::atomic<bool> mEOS{false};
     std::atomic<bool> mFinalUpdate{false};
 
     VideoState(MovieState &movie) : mMovie(movie) { }
+    ~VideoState()
+    {
+        if(mImage)
+            SDL_DestroyTexture(mImage);
+        mImage = nullptr;
+    }
 
     nanoseconds getClock();
 
-    static Uint32 SDLCALL sdl_refresh_timer_cb(Uint32 interval, void *opaque);
-    void schedRefresh(milliseconds delay);
-    void display(SDL_Window *screen, SDL_Renderer *renderer, Picture *vp);
-    void refreshTimer(SDL_Window *screen, SDL_Renderer *renderer);
-    void updatePicture(SDL_Window *screen, SDL_Renderer *renderer);
-    bool queuePicture(nanoseconds pts, AVFrame *frame);
+    void display(SDL_Window *screen, SDL_Renderer *renderer);
+    void updateVideo(SDL_Window *screen, SDL_Renderer *renderer);
     int handler();
 };
 
@@ -385,7 +380,7 @@ struct MovieState {
 
     SyncMaster mAVSyncType{SyncMaster::Default};
 
-    microseconds mClockBase{0};
+    microseconds mClockBase{microseconds::min()};
 
     std::atomic<bool> mQuit{false};
 
@@ -706,14 +701,14 @@ void AL_APIENTRY AudioState::EventCallback(ALenum eventType, ALuint object, ALui
                                            ALsizei length, const ALchar *message,
                                            void *userParam)
 {
-    AudioState *self = static_cast<AudioState*>(userParam);
+    auto self = static_cast<AudioState*>(userParam);
 
     if(eventType == AL_EVENT_TYPE_BUFFER_COMPLETED_SOFT)
     {
         /* Temporarily lock the source mutex to ensure it's not between
          * checking the processed count and going to sleep.
          */
-        std::unique_lock<std::mutex>(self->mSrcMutex).unlock();
+        std::unique_lock<std::mutex>{self->mSrcMutex}.unlock();
         self->mSrcCond.notify_one();
         return;
     }
@@ -738,7 +733,8 @@ void AL_APIENTRY AudioState::EventCallback(ALenum eventType, ALuint object, ALui
 
     if(eventType == AL_EVENT_TYPE_DISCONNECTED_SOFT)
     {
-        { std::lock_guard<std::mutex> lock(self->mSrcMutex);
+        {
+            std::lock_guard<std::mutex> lock{self->mSrcMutex};
             self->mConnected.clear(std::memory_order_release);
         }
         self->mSrcCond.notify_one();
@@ -748,9 +744,18 @@ void AL_APIENTRY AudioState::EventCallback(ALenum eventType, ALuint object, ALui
 
 int AudioState::handler()
 {
-    std::unique_lock<std::mutex> srclock(mSrcMutex);
-    milliseconds sleep_time = AudioBufferTime / 3;
+    std::unique_lock<std::mutex> srclock{mSrcMutex};
+    milliseconds sleep_time{AudioBufferTime / 3};
     ALenum fmt;
+
+    if(alcGetInteger64vSOFT)
+    {
+        int64_t devtime{};
+        alcGetInteger64vSOFT(alcGetContextsDevice(alcGetCurrentContext()), ALC_DEVICE_CLOCK_SOFT,
+            1, &devtime);
+        mDeviceStartTime = nanoseconds{devtime} - mCurrentPts;
+    }
+    srclock.unlock();
 
 #ifdef AL_SOFT_events
     const std::array<ALenum,6> evt_types{{
@@ -999,13 +1004,7 @@ int AudioState::handler()
 #endif
         samples = av_malloc(buffer_len);
 
-    {
-        int64_t devtime{};
-        alcGetInteger64vSOFT(alcGetContextsDevice(alcGetCurrentContext()), ALC_DEVICE_CLOCK_SOFT,
-            1, &devtime);
-        mDeviceStartTime = nanoseconds{devtime} - mCurrentPts;
-    }
-
+    srclock.lock();
     while(alGetError() == AL_NO_ERROR && !mMovie.mQuit.load(std::memory_order_relaxed) &&
           mConnected.test_and_set(std::memory_order_relaxed))
     {
@@ -1086,10 +1085,10 @@ int AudioState::handler()
 
     alSourceRewind(mSource);
     alSourcei(mSource, AL_BUFFER, 0);
+    srclock.unlock();
 
 finish:
     av_freep(&samples);
-    srclock.unlock();
 
 #ifdef AL_SOFT_events
     if(alEventControlSOFT)
@@ -1106,30 +1105,17 @@ finish:
 nanoseconds VideoState::getClock()
 {
     /* NOTE: This returns incorrect times while not playing. */
-    std::lock_guard<std::mutex> _{mPictQMutex};
-    auto delta = get_avtime() - mCurrentPtsTime;
-    return mCurrentPts + delta;
+    std::lock_guard<std::mutex> _{mDispPtsMutex};
+    if(mDisplayPtsTime == microseconds::min())
+        return nanoseconds::zero();
+    auto delta = get_avtime() - mDisplayPtsTime;
+    return mDisplayPts + delta;
 }
 
-Uint32 SDLCALL VideoState::sdl_refresh_timer_cb(Uint32 /*interval*/, void *opaque)
+/* Called by VideoState::updateVideo to display the next video frame. */
+void VideoState::display(SDL_Window *screen, SDL_Renderer *renderer)
 {
-    SDL_Event evt{};
-    evt.user.type = FF_REFRESH_EVENT;
-    evt.user.data1 = opaque;
-    SDL_PushEvent(&evt);
-    return 0; /* 0 means stop timer */
-}
-
-/* Schedules an FF_REFRESH_EVENT event to occur in 'delay' ms. */
-void VideoState::schedRefresh(milliseconds delay)
-{
-    SDL_AddTimer(delay.count(), sdl_refresh_timer_cb, this);
-}
-
-/* Called by VideoState::refreshTimer to display the next video frame. */
-void VideoState::display(SDL_Window *screen, SDL_Renderer *renderer, Picture *vp)
-{
-    if(!vp->mImage)
+    if(!mImage)
         return;
 
     float aspect_ratio;
@@ -1157,235 +1143,171 @@ void VideoState::display(SDL_Window *screen, SDL_Renderer *renderer, Picture *vp
     x = (win_w - w) / 2;
     y = (win_h - h) / 2;
 
-    SDL_Rect src_rect{ 0, 0, vp->mWidth, vp->mHeight };
+    SDL_Rect src_rect{ 0, 0, mWidth, mHeight };
     SDL_Rect dst_rect{ x, y, w, h };
-    SDL_RenderCopy(renderer, vp->mImage, &src_rect, &dst_rect);
+    SDL_RenderCopy(renderer, mImage, &src_rect, &dst_rect);
     SDL_RenderPresent(renderer);
 }
 
-/* FF_REFRESH_EVENT handler called on the main thread where the SDL_Renderer
- * was created. It handles the display of the next decoded video frame (if not
- * falling behind), and sets up the timer for the following video frame.
+/* Called regularly on the main thread where the SDL_Renderer was created. It
+ * handles updating the textures of decoded frames and displaying the latest
+ * frame.
  */
-void VideoState::refreshTimer(SDL_Window *screen, SDL_Renderer *renderer)
+void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
 {
-    if(!mStream)
-    {
-        if(mEOS)
-        {
-            mFinalUpdate = true;
-            std::unique_lock<std::mutex>(mPictQMutex).unlock();
-            mPictQCond.notify_all();
-            return;
-        }
-        schedRefresh(milliseconds{100});
-        return;
-    }
+    size_t read_idx{mPictQRead.load(std::memory_order_relaxed)};
+    Picture *vp{&mPictQ[read_idx]};
 
-    std::unique_lock<std::mutex> lock{mPictQMutex};
-retry:
-    if(mPictQPrepSize == 0 || mMovie.mQuit.load(std::memory_order_relaxed))
+    auto clocktime = mMovie.getMasterClock();
+    bool updated{false};
+    while(1)
+    {
+        size_t next_idx{(read_idx+1)%mPictQ.size()};
+        if(next_idx == mPictQWrite.load(std::memory_order_acquire))
+            break;
+        Picture *nextvp{&mPictQ[next_idx]};
+        if(clocktime < nextvp->mPts)
+            break;
+
+        vp = nextvp;
+        updated = true;
+        read_idx = next_idx;
+    }
+    if(mMovie.mQuit.load(std::memory_order_relaxed))
     {
         if(mEOS)
             mFinalUpdate = true;
-        else
-            schedRefresh(milliseconds{10});
-        lock.unlock();
+        mPictQRead.store(read_idx, std::memory_order_release);
+        std::unique_lock<std::mutex>{mPictQMutex}.unlock();
         mPictQCond.notify_all();
         return;
     }
 
-    Picture *vp = &mPictQ[mPictQRead];
-
-    /* Get delay using the frame pts and the pts from last frame. */
-    auto delay = vp->mPts - mFrameLastPts;
-    if(delay <= seconds::zero() || delay >= seconds{1})
+    if(updated)
     {
-        /* If incorrect delay, use previous one. */
-        delay = mFrameLastDelay;
-    }
-    /* Save for next frame. */
-    mFrameLastDelay = delay;
-    mFrameLastPts = vp->mPts;
-    lock.unlock();
+        mPictQRead.store(read_idx, std::memory_order_release);
+        std::unique_lock<std::mutex>{mPictQMutex}.unlock();
+        mPictQCond.notify_all();
 
-    /* Update delay to sync to clock if not master source. */
-    if(mMovie.mAVSyncType != SyncMaster::Video)
-    {
-        auto ref_clock = mMovie.getMasterClock();
-        auto diff = vp->mPts - ref_clock;
-
-        /* Skip or repeat the frame. Take delay into account. */
-        auto sync_threshold = std::min<nanoseconds>(delay, VideoSyncThreshold);
-        if(!(diff < AVNoSyncThreshold && diff > -AVNoSyncThreshold))
+        /* allocate or resize the buffer! */
+        bool fmt_updated{false};
+        if(!mImage || mWidth != mCodecCtx->width || mHeight != mCodecCtx->height)
         {
-            if(diff <= -sync_threshold)
-                delay = nanoseconds::zero();
-            else if(diff >= sync_threshold)
-                delay *= 2;
+            fmt_updated = true;
+            if(mImage)
+                SDL_DestroyTexture(mImage);
+            mImage = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,
+                mCodecCtx->coded_width, mCodecCtx->coded_height);
+            if(!mImage)
+                std::cerr<< "Failed to create YV12 texture!" <<std::endl;
+            mWidth = mCodecCtx->width;
+            mHeight = mCodecCtx->height;
+
+            if(mFirstUpdate && mWidth > 0 && mHeight > 0)
+            {
+                /* For the first update, set the window size to the video size. */
+                mFirstUpdate = false;
+
+                int w{mWidth};
+                int h{mHeight};
+                if(mCodecCtx->sample_aspect_ratio.den != 0)
+                {
+                    double aspect_ratio = av_q2d(mCodecCtx->sample_aspect_ratio);
+                    if(aspect_ratio >= 1.0)
+                        w = static_cast<int>(w*aspect_ratio + 0.5);
+                    else if(aspect_ratio > 0.0)
+                        h = static_cast<int>(h/aspect_ratio + 0.5);
+                }
+                SDL_SetWindowSize(screen, w, h);
+            }
+        }
+
+        if(mImage)
+        {
+            AVFrame *frame{vp->mFrame.get()};
+            void *pixels{nullptr};
+            int pitch{0};
+
+            if(mCodecCtx->pix_fmt == AV_PIX_FMT_YUV420P)
+                SDL_UpdateYUVTexture(mImage, nullptr,
+                    frame->data[0], frame->linesize[0],
+                    frame->data[1], frame->linesize[1],
+                    frame->data[2], frame->linesize[2]
+                );
+            else if(SDL_LockTexture(mImage, nullptr, &pixels, &pitch) != 0)
+                std::cerr<< "Failed to lock texture" <<std::endl;
+            else
+            {
+                // Convert the image into YUV format that SDL uses
+                int coded_w{mCodecCtx->coded_width};
+                int coded_h{mCodecCtx->coded_height};
+                int w{mCodecCtx->width};
+                int h{mCodecCtx->height};
+                if(!mSwscaleCtx || fmt_updated)
+                {
+                    mSwscaleCtx.reset(sws_getContext(
+                        w, h, mCodecCtx->pix_fmt,
+                        w, h, AV_PIX_FMT_YUV420P, 0,
+                        nullptr, nullptr, nullptr
+                    ));
+                }
+
+                /* point pict at the queue */
+                uint8_t *pict_data[3];
+                pict_data[0] = static_cast<uint8_t*>(pixels);
+                pict_data[1] = pict_data[0] + coded_w*coded_h;
+                pict_data[2] = pict_data[1] + coded_w*coded_h/4;
+
+                int pict_linesize[3];
+                pict_linesize[0] = pitch;
+                pict_linesize[1] = pitch / 2;
+                pict_linesize[2] = pitch / 2;
+
+                sws_scale(mSwscaleCtx.get(), reinterpret_cast<uint8_t**>(frame->data), frame->linesize,
+                    0, h, pict_data, pict_linesize);
+                SDL_UnlockTexture(mImage);
+            }
         }
     }
-
-    mFrameTimer += delay;
-    /* Compute the REAL delay. */
-    auto actual_delay = mFrameTimer - get_avtime();
-    if(!(actual_delay >= VideoSyncThreshold))
-    {
-        /* We don't have time to handle this picture, just skip to the next one. */
-        lock.lock();
-        mCurrentPts = vp->mPts;
-        mCurrentPtsTime = get_avtime();
-
-        mPictQRead = (mPictQRead+1)%mPictQ.size();
-        --mPictQSize; --mPictQPrepSize;
-        mPictQCond.notify_all();
-        goto retry;
-    }
-    schedRefresh(std::chrono::duration_cast<milliseconds>(actual_delay));
 
     /* Show the picture! */
-    display(screen, renderer, vp);
+    display(screen, renderer);
 
-    /* Update queue for next picture. */
-    lock.lock();
-    mCurrentPts = vp->mPts;
-    mCurrentPtsTime = get_avtime();
-
-    mPictQRead = (mPictQRead+1)%mPictQ.size();
-    --mPictQSize; --mPictQPrepSize;
-    lock.unlock();
-    mPictQCond.notify_all();
-}
-
-/* FF_UPDATE_EVENT handler, updates the picture's texture. It's called on the
- * main thread where the renderer was created.
- */
-void VideoState::updatePicture(SDL_Window *screen, SDL_Renderer *renderer)
-{
-    if(mMovie.mQuit.load(std::memory_order_relaxed))
-        return;
-
-    Picture *vp = &mPictQ[mPictQPrep];
-    bool fmt_updated = false;
-
-    /* allocate or resize the buffer! */
-    if(!vp->mImage || vp->mWidth != mCodecCtx->width || vp->mHeight != mCodecCtx->height)
+    if(updated)
     {
-        fmt_updated = true;
-        if(vp->mImage)
-            SDL_DestroyTexture(vp->mImage);
-        vp->mImage = SDL_CreateTexture(
-            renderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,
-            mCodecCtx->coded_width, mCodecCtx->coded_height
-        );
-        if(!vp->mImage)
-            std::cerr<< "Failed to create YV12 texture!" <<std::endl;
-        vp->mWidth = mCodecCtx->width;
-        vp->mHeight = mCodecCtx->height;
+        auto disp_time = get_avtime();
 
-        if(mFirstUpdate && vp->mWidth > 0 && vp->mHeight > 0)
+        std::lock_guard<std::mutex> _{mDispPtsMutex};
+        mDisplayPts = vp->mPts;
+        mDisplayPtsTime = disp_time;
+    }
+    if(mEOS.load(std::memory_order_acquire))
+    {
+        if((read_idx+1)%mPictQ.size() == mPictQWrite.load(std::memory_order_acquire))
         {
-            /* For the first update, set the window size to the video size. */
-            mFirstUpdate = false;
-
-            int w = vp->mWidth;
-            int h = vp->mHeight;
-            if(mCodecCtx->sample_aspect_ratio.den != 0)
-            {
-                double aspect_ratio = av_q2d(mCodecCtx->sample_aspect_ratio);
-                if(aspect_ratio >= 1.0)
-                    w = static_cast<int>(w*aspect_ratio + 0.5);
-                else if(aspect_ratio > 0.0)
-                    h = static_cast<int>(h/aspect_ratio + 0.5);
-            }
-            SDL_SetWindowSize(screen, w, h);
+            mFinalUpdate = true;
+            std::unique_lock<std::mutex>{mPictQMutex}.unlock();
+            mPictQCond.notify_all();
         }
     }
-
-    AVFrame *frame{vp->mFrame.get()};
-    if(vp->mImage)
-    {
-        void *pixels{nullptr};
-        int pitch{0};
-
-        if(mCodecCtx->pix_fmt == AV_PIX_FMT_YUV420P)
-            SDL_UpdateYUVTexture(vp->mImage, nullptr,
-                frame->data[0], frame->linesize[0],
-                frame->data[1], frame->linesize[1],
-                frame->data[2], frame->linesize[2]
-            );
-        else if(SDL_LockTexture(vp->mImage, nullptr, &pixels, &pitch) != 0)
-            std::cerr<< "Failed to lock texture" <<std::endl;
-        else
-        {
-            // Convert the image into YUV format that SDL uses
-            int coded_w{mCodecCtx->coded_width};
-            int coded_h{mCodecCtx->coded_height};
-            int w{mCodecCtx->width};
-            int h{mCodecCtx->height};
-            if(!mSwscaleCtx || fmt_updated)
-            {
-                mSwscaleCtx.reset(sws_getContext(
-                    w, h, mCodecCtx->pix_fmt,
-                    w, h, AV_PIX_FMT_YUV420P, 0,
-                    nullptr, nullptr, nullptr
-                ));
-            }
-
-            /* point pict at the queue */
-            uint8_t *pict_data[3];
-            pict_data[0] = reinterpret_cast<uint8_t*>(pixels);
-            pict_data[1] = pict_data[0] + coded_w*coded_h;
-            pict_data[2] = pict_data[1] + coded_w*coded_h/4;
-
-            int pict_linesize[3];
-            pict_linesize[0] = pitch;
-            pict_linesize[1] = pitch / 2;
-            pict_linesize[2] = pitch / 2;
-
-            sws_scale(mSwscaleCtx.get(), reinterpret_cast<uint8_t**>(frame->data), frame->linesize,
-                0, h, pict_data, pict_linesize);
-            SDL_UnlockTexture(vp->mImage);
-        }
-    }
-    av_frame_unref(frame);
-
-    mPictQPrep = (mPictQPrep+1)%mPictQ.size();
-    ++mPictQPrepSize;
-}
-
-bool VideoState::queuePicture(nanoseconds pts, AVFrame *frame)
-{
-    /* Wait until we have space for a new pic */
-    std::unique_lock<std::mutex> lock{mPictQMutex};
-    while(mPictQSize >= mPictQ.size() && !mMovie.mQuit.load(std::memory_order_relaxed))
-        mPictQCond.wait(lock);
-
-    if(mMovie.mQuit.load(std::memory_order_relaxed))
-        return false;
-
-    Picture *vp{&mPictQ[mPictQWrite]};
-    av_frame_move_ref(vp->mFrame.get(), frame);
-    vp->mPts = pts;
-
-    mPictQWrite = (mPictQWrite+1)%mPictQ.size();
-    ++mPictQSize;
-    lock.unlock();
-
-    /* We have to create/update the picture in the main thread  */
-    SDL_Event evt{};
-    evt.user.type = FF_UPDATE_EVENT;
-    evt.user.data1 = this;
-    SDL_PushEvent(&evt);
-
-    return true;
 }
 
 int VideoState::handler()
 {
-    AVFramePtr decoded_frame{av_frame_alloc()};
+    {
+        std::lock_guard<std::mutex> _{mDispPtsMutex};
+        mDisplayPtsTime = get_avtime();
+    }
+
+    std::for_each(mPictQ.begin(), mPictQ.end(),
+        [](Picture &pict) -> void
+        { pict.mFrame = AVFramePtr{av_frame_alloc()}; });
+
     while(!mMovie.mQuit.load(std::memory_order_relaxed))
     {
+        size_t write_idx{mPictQWrite.load(std::memory_order_relaxed)};
+        Picture *vp{&mPictQ[write_idx]};
+
         {
             std::unique_lock<std::mutex> lock{mPackets.getMutex()};
             AVPacket *lastpkt{};
@@ -1399,7 +1321,8 @@ int VideoState::handler()
                 avcodec_send_packet(mCodecCtx.get(), nullptr);
         }
         /* Decode video frame */
-        int ret{avcodec_receive_frame(mCodecCtx.get(), decoded_frame.get())};
+        AVFrame *decoded_frame{vp->mFrame.get()};
+        int ret{avcodec_receive_frame(mCodecCtx.get(), decoded_frame)};
         if(ret == AVERROR_EOF) break;
         if(ret < 0)
         {
@@ -1409,23 +1332,34 @@ int VideoState::handler()
 
         /* Get the PTS for this frame. */
         if(decoded_frame->best_effort_timestamp != AV_NOPTS_VALUE)
-            mClock = std::chrono::duration_cast<nanoseconds>(
+            mCurrentPts = std::chrono::duration_cast<nanoseconds>(
                 seconds_d64{av_q2d(mStream->time_base)*decoded_frame->best_effort_timestamp});
-        nanoseconds pts{mClock};
+        vp->mPts = mCurrentPts;
 
         /* Update the video clock to the next expected PTS. */
         auto frame_delay = av_q2d(mCodecCtx->time_base);
         frame_delay += decoded_frame->repeat_pict * (frame_delay * 0.5);
-        mClock += std::chrono::duration_cast<nanoseconds>(seconds_d64{frame_delay});
+        mCurrentPts += std::chrono::duration_cast<nanoseconds>(seconds_d64{frame_delay});
 
-        if(!queuePicture(pts, decoded_frame.get()))
-            break;
+        /* Put the frame in the queue to be loaded into a texture and displayed
+         * by the rendering thread.
+         */
+        write_idx = (write_idx+1)%mPictQ.size();
+        mPictQWrite.store(write_idx, std::memory_order_release);
+
+        if(write_idx == mPictQRead.load(std::memory_order_acquire))
+        {
+            /* Wait until we have space for a new pic */
+            std::unique_lock<std::mutex> lock{mPictQMutex};
+            while(write_idx == mPictQRead.load(std::memory_order_acquire) &&
+                !mMovie.mQuit.load(std::memory_order_relaxed))
+                mPictQCond.wait(lock);
+        }
     }
     mEOS = true;
 
-    std::unique_lock<std::mutex> lock(mPictQMutex);
-    while(!mFinalUpdate)
-        mPictQCond.wait(lock);
+    std::unique_lock<std::mutex> lock{mPictQMutex};
+    while(!mFinalUpdate) mPictQCond.wait(lock);
 
     return 0;
 }
@@ -1467,8 +1401,6 @@ bool MovieState::prepare()
         return false;
     }
 
-    mVideo.schedRefresh(milliseconds{40});
-
     mParseThread = std::thread{std::mem_fn(&MovieState::parse_handler), this};
     return true;
 }
@@ -1485,6 +1417,8 @@ void MovieState::setTitle(SDL_Window *window)
 
 nanoseconds MovieState::getClock()
 {
+    if(mClockBase == microseconds::min())
+        return nanoseconds::zero();
     return get_avtime() - mClockBase;
 }
 
@@ -1569,10 +1503,8 @@ int MovieState::parse_handler()
         mQuit = true;
     }
 
-    /* Set the base time 500ms ahead of the current av time. */
-    mClockBase = get_avtime() + milliseconds{500};
-    mVideo.mCurrentPtsTime = mClockBase;
-    mVideo.mFrameTimer = mVideo.mCurrentPtsTime;
+    /* Set the base time 750ms ahead of the current av time. */
+    mClockBase = get_avtime() + milliseconds{750};
 
     if(audio_index >= 0)
         mAudioThread = std::thread{std::mem_fn(&AudioState::handler), &mAudio};
@@ -1590,12 +1522,12 @@ int MovieState::parse_handler()
         if(packet.stream_index == video_index)
         {
             while(!mQuit.load(std::memory_order_acquire) && !video_queue.put(&packet))
-                std::this_thread::sleep_for(milliseconds{50});
+                std::this_thread::sleep_for(milliseconds{100});
         }
         else if(packet.stream_index == audio_index)
         {
             while(!mQuit.load(std::memory_order_acquire) && !audio_queue.put(&packet))
-                std::this_thread::sleep_for(milliseconds{50});
+                std::this_thread::sleep_for(milliseconds{100});
         }
 
         av_packet_unref(&packet);
@@ -1628,13 +1560,13 @@ int MovieState::parse_handler()
 struct PrettyTime {
     seconds mTime;
 };
-inline std::ostream &operator<<(std::ostream &os, const PrettyTime &rhs)
+std::ostream &operator<<(std::ostream &os, const PrettyTime &rhs)
 {
     using hours = std::chrono::hours;
     using minutes = std::chrono::minutes;
     using std::chrono::duration_cast;
 
-    seconds t = rhs.mTime;
+    seconds t{rhs.mTime};
     if(t.count() < 0)
     {
         os << '-';
@@ -1671,7 +1603,7 @@ int main(int argc, char *argv[])
     /* Initialize networking protocols */
     avformat_network_init();
 
-    if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER))
+    if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
     {
         std::cerr<< "Could not initialize SDL - <<"<<SDL_GetError() <<std::endl;
         return 1;
@@ -1728,7 +1660,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    { auto device = alcGetContextsDevice(alcGetCurrentContext());
+    {
+        auto device = alcGetContextsDevice(alcGetCurrentContext());
         if(alcIsExtensionPresent(device, "ALC_SOFT_device_clock"))
         {
             std::cout<< "Found ALC_SOFT_device_clock" <<std::endl;
@@ -1813,101 +1746,96 @@ int main(int argc, char *argv[])
     enum class EomAction {
         Next, Quit
     } eom_action{EomAction::Next};
-    seconds last_time{-1};
-    SDL_Event event{};
+    seconds last_time{seconds::min()};
     while(1)
     {
+        SDL_Event event{};
         int have_evt{SDL_WaitEventTimeout(&event, 10)};
 
         auto cur_time = std::chrono::duration_cast<seconds>(movState->getMasterClock());
         if(cur_time != last_time)
         {
             auto end_time = std::chrono::duration_cast<seconds>(movState->getDuration());
-            std::cout<< "\r "<<PrettyTime{cur_time}<<" / "<<PrettyTime{end_time} <<std::flush;
+            std::cout<< "    \r "<<PrettyTime{cur_time}<<" / "<<PrettyTime{end_time} <<std::flush;
             last_time = cur_time;
         }
-        if(!have_evt) continue;
 
-        switch(event.type)
-        {
-            case SDL_KEYDOWN:
-                switch(event.key.keysym.sym)
-                {
-                    case SDLK_ESCAPE:
-                        movState->mQuit = true;
-                        eom_action = EomAction::Quit;
-                        break;
+        if(have_evt) do {
+            switch(event.type)
+            {
+                case SDL_KEYDOWN:
+                    switch(event.key.keysym.sym)
+                    {
+                        case SDLK_ESCAPE:
+                            movState->mQuit = true;
+                            eom_action = EomAction::Quit;
+                            break;
 
-                    case SDLK_n:
-                        movState->mQuit = true;
-                        eom_action = EomAction::Next;
-                        break;
+                        case SDLK_n:
+                            movState->mQuit = true;
+                            eom_action = EomAction::Next;
+                            break;
 
-                    default:
-                        break;
-                }
-                break;
+                        default:
+                            break;
+                    }
+                    break;
 
-            case SDL_WINDOWEVENT:
-                switch(event.window.event)
-                {
-                    case SDL_WINDOWEVENT_RESIZED:
-                        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                        SDL_RenderFillRect(renderer, nullptr);
-                        break;
+                case SDL_WINDOWEVENT:
+                    switch(event.window.event)
+                    {
+                        case SDL_WINDOWEVENT_RESIZED:
+                            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+                            SDL_RenderFillRect(renderer, nullptr);
+                            break;
 
-                    default:
-                        break;
-                }
-                break;
+                        default:
+                            break;
+                    }
+                    break;
 
-            case SDL_QUIT:
-                movState->mQuit = true;
-                eom_action = EomAction::Quit;
-                break;
+                case SDL_QUIT:
+                    movState->mQuit = true;
+                    eom_action = EomAction::Quit;
+                    break;
 
-            case FF_UPDATE_EVENT:
-                static_cast<VideoState*>(event.user.data1)->updatePicture(screen, renderer);
-                break;
+                case FF_MOVIE_DONE_EVENT:
+                    std::cout<<'\n';
+                    last_time = seconds::min();
+                    if(eom_action != EomAction::Quit)
+                    {
+                        movState = nullptr;
+                        while(fileidx < argc && !movState)
+                        {
+                            movState = std::unique_ptr<MovieState>{new MovieState{argv[fileidx++]}};
+                            if(!movState->prepare()) movState = nullptr;
+                        }
+                        if(movState)
+                        {
+                            movState->setTitle(screen);
+                            break;
+                        }
+                    }
 
-            case FF_REFRESH_EVENT:
-                static_cast<VideoState*>(event.user.data1)->refreshTimer(screen, renderer);
-                break;
-
-            case FF_MOVIE_DONE_EVENT:
-                std::cout<<'\n';
-                last_time = seconds(-1);
-                if(eom_action != EomAction::Quit)
-                {
+                    /* Nothing more to play. Shut everything down and quit. */
                     movState = nullptr;
-                    while(fileidx < argc && !movState)
-                    {
-                        movState = std::unique_ptr<MovieState>{new MovieState{argv[fileidx++]}};
-                        if(!movState->prepare()) movState = nullptr;
-                    }
-                    if(movState)
-                    {
-                        movState->setTitle(screen);
-                        break;
-                    }
-                }
 
-                /* Nothing more to play. Shut everything down and quit. */
-                movState = nullptr;
+                    CloseAL();
 
-                CloseAL();
+                    SDL_DestroyRenderer(renderer);
+                    renderer = nullptr;
+                    SDL_DestroyWindow(screen);
+                    screen = nullptr;
 
-                SDL_DestroyRenderer(renderer);
-                renderer = nullptr;
-                SDL_DestroyWindow(screen);
-                screen = nullptr;
+                    SDL_Quit();
+                    exit(0);
 
-                SDL_Quit();
-                exit(0);
+                default:
+                    break;
+            }
+        } while(SDL_PollEvent(&event));
 
-            default:
-                break;
-        }
+        movState->mVideo.updateVideo(screen, renderer);
     }
 
     std::cerr<< "SDL_WaitEvent error - "<<SDL_GetError() <<std::endl;
