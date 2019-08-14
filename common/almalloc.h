@@ -1,11 +1,14 @@
 #ifndef AL_MALLOC_H
 #define AL_MALLOC_H
 
-#include <stddef.h>
-
-#include <memory>
-#include <limits>
 #include <algorithm>
+#include <cstddef>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
 
 
 void *al_malloc(size_t alignment, size_t size);
@@ -220,6 +223,11 @@ struct FlexArray {
     const index_type mSize;
     alignas(alignment) element_type mArray[0];
 
+    static std::unique_ptr<FlexArray> Create(index_type count)
+    {
+        void *ptr{al_calloc(alignof(FlexArray), Sizeof(count))};
+        return std::unique_ptr<FlexArray>{new (ptr) FlexArray{count}};
+    }
     static constexpr index_type Sizeof(index_type count, index_type base=0u) noexcept
     {
         return base +

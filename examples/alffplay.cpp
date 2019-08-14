@@ -8,29 +8,44 @@
 #include <functional>
 #include <algorithm>
 #include <iostream>
+#include <utility>
 #include <iomanip>
+#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <thread>
-#include <chrono>
+#include <cstdlib>
 #include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <thread>
 #include <vector>
-#include <mutex>
-#include <deque>
 #include <array>
 #include <cmath>
-#include <string>
+#include <deque>
+#include <mutex>
+#include <ratio>
 
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 #include "libavformat/avio.h"
-#include "libavutil/time.h"
+#include "libavformat/version.h"
+#include "libavutil/avutil.h"
+#include "libavutil/error.h"
+#include "libavutil/frame.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixfmt.h"
-#include "libavutil/avstring.h"
+#include "libavutil/rational.h"
+#include "libavutil/samplefmt.h"
+#include "libavutil/time.h"
+#include "libavutil/version.h"
 #include "libavutil/channel_layout.h"
 #include "libswscale/swscale.h"
 #include "libswresample/swresample.h"
+
+struct SwsContext;
 }
 
 #include "SDL.h"
@@ -120,7 +135,7 @@ LPALEVENTCALLBACKSOFT alEventCallbackSOFT;
 const seconds AVNoSyncThreshold{10};
 
 const milliseconds VideoSyncThreshold{10};
-#define VIDEO_PICTURE_QUEUE_SIZE 16
+#define VIDEO_PICTURE_QUEUE_SIZE 24
 
 const seconds_d64 AudioSyncThreshold{0.03};
 const milliseconds AudioSampleCorrectionMax{50};
@@ -188,6 +203,21 @@ class PacketQueue {
     size_t mTotalSize{0};
     bool mFinished{false};
 
+    AVPacket *getPacket(std::unique_lock<std::mutex> &lock)
+    {
+        while(mPackets.empty() && !mFinished)
+            mCondVar.wait(lock);
+        return mPackets.empty() ? nullptr : &mPackets.front();
+    }
+
+    void pop()
+    {
+        AVPacket *pkt = &mPackets.front();
+        mTotalSize -= pkt->size;
+        av_packet_unref(pkt);
+        mPackets.pop_front();
+    }
+
 public:
     ~PacketQueue()
     {
@@ -197,6 +227,23 @@ public:
         mTotalSize = 0;
     }
 
+    int sendTo(AVCodecContext *codecctx)
+    {
+        std::unique_lock<std::mutex> lock{mMutex};
+
+        AVPacket *pkt{getPacket(lock)};
+        if(!pkt) return avcodec_send_packet(codecctx, nullptr);
+
+        const int ret{avcodec_send_packet(codecctx, pkt)};
+        if(ret != AVERROR(EAGAIN))
+        {
+            if(ret < 0)
+                std::cerr<< "Failed to send packet: "<<ret <<std::endl;
+            pop();
+        }
+        return ret;
+    }
+
     void setFinished()
     {
         {
@@ -204,13 +251,6 @@ public:
             mFinished = true;
         }
         mCondVar.notify_one();
-    }
-
-    AVPacket *getPacket(std::unique_lock<std::mutex> &lock)
-    {
-        while(mPackets.empty() && !mFinished)
-            mCondVar.wait(lock);
-        return mPackets.empty() ? nullptr : &mPackets.front();
     }
 
     bool put(const AVPacket *pkt)
@@ -232,16 +272,6 @@ public:
         mCondVar.notify_one();
         return true;
     }
-
-    void pop()
-    {
-        AVPacket *pkt = &mPackets.front();
-        mTotalSize -= pkt->size;
-        av_packet_unref(pkt);
-        mPackets.pop_front();
-    }
-
-    std::mutex &getMutex() noexcept { return mMutex; }
 };
 
 
@@ -331,8 +361,6 @@ struct VideoState {
 
     PacketQueue<14*1024*1024> mPackets;
 
-    /* The expected pts of the next frame to decode. */
-    nanoseconds mCurrentPts{0};
     /* The pts of the currently displayed frame, and the time (av_gettime) it
      * was last updated - used to have running video pts
      */
@@ -370,7 +398,7 @@ struct VideoState {
     nanoseconds getClock();
 
     void display(SDL_Window *screen, SDL_Renderer *renderer);
-    void updateVideo(SDL_Window *screen, SDL_Renderer *renderer);
+    void updateVideo(SDL_Window *screen, SDL_Renderer *renderer, bool redraw);
     int handler();
 };
 
@@ -547,31 +575,18 @@ int AudioState::decodeFrame()
 {
     while(!mMovie.mQuit.load(std::memory_order_relaxed))
     {
+        int ret;
+        while((ret=avcodec_receive_frame(mCodecCtx.get(), mDecodedFrame.get())) == AVERROR(EAGAIN))
+            mPackets.sendTo(mCodecCtx.get());
+        if(ret != 0)
         {
-            std::unique_lock<std::mutex> lock{mPackets.getMutex()};
-            AVPacket *lastpkt{};
-            while((lastpkt=mPackets.getPacket(lock)) != nullptr)
-            {
-                int ret{avcodec_send_packet(mCodecCtx.get(), lastpkt)};
-                if(ret == AVERROR(EAGAIN)) break;
-                mPackets.pop();
-            }
-            if(!lastpkt)
-                avcodec_send_packet(mCodecCtx.get(), nullptr);
-        }
-        int ret{avcodec_receive_frame(mCodecCtx.get(), mDecodedFrame.get())};
-        if(ret == AVERROR_EOF) break;
-        if(ret < 0)
-        {
-            std::cerr<< "Failed to decode frame: "<<ret <<std::endl;
-            return 0;
+            if(ret == AVERROR_EOF) break;
+            std::cerr<< "Failed to receive frame: "<<ret <<std::endl;
+            continue;
         }
 
         if(mDecodedFrame->nb_samples <= 0)
-        {
-            av_frame_unref(mDecodedFrame.get());
             continue;
-        }
 
         /* If provided, update w/ pts */
         if(mDecodedFrame->best_effort_timestamp != AV_NOPTS_VALUE)
@@ -744,18 +759,9 @@ void AL_APIENTRY AudioState::EventCallback(ALenum eventType, ALuint object, ALui
 
 int AudioState::handler()
 {
-    std::unique_lock<std::mutex> srclock{mSrcMutex};
+    std::unique_lock<std::mutex> srclock{mSrcMutex, std::defer_lock};
     milliseconds sleep_time{AudioBufferTime / 3};
     ALenum fmt;
-
-    if(alcGetInteger64vSOFT)
-    {
-        int64_t devtime{};
-        alcGetInteger64vSOFT(alcGetContextsDevice(alcGetCurrentContext()), ALC_DEVICE_CLOCK_SOFT,
-            1, &devtime);
-        mDeviceStartTime = nanoseconds{devtime} - mCurrentPts;
-    }
-    srclock.unlock();
 
 #ifdef AL_SOFT_events
     const std::array<ALenum,6> evt_types{{
@@ -1004,7 +1010,21 @@ int AudioState::handler()
 #endif
         samples = av_malloc(buffer_len);
 
+    /* Prefill the codec buffer. */
+    do {
+        const int ret{mPackets.sendTo(mCodecCtx.get())};
+        if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+    } while(1);
+
     srclock.lock();
+    if(alcGetInteger64vSOFT)
+    {
+        int64_t devtime{};
+        alcGetInteger64vSOFT(alcGetContextsDevice(alcGetCurrentContext()), ALC_DEVICE_CLOCK_SOFT,
+            1, &devtime);
+        mDeviceStartTime = nanoseconds{devtime} - mCurrentPts;
+    }
     while(alGetError() == AL_NO_ERROR && !mMovie.mQuit.load(std::memory_order_relaxed) &&
           mConnected.test_and_set(std::memory_order_relaxed))
     {
@@ -1153,7 +1173,7 @@ void VideoState::display(SDL_Window *screen, SDL_Renderer *renderer)
  * handles updating the textures of decoded frames and displaying the latest
  * frame.
  */
-void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
+void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer, bool redraw)
 {
     size_t read_idx{mPictQRead.load(std::memory_order_relaxed)};
     Picture *vp{&mPictQ[read_idx]};
@@ -1179,7 +1199,7 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
             mFinalUpdate = true;
         mPictQRead.store(read_idx, std::memory_order_release);
         std::unique_lock<std::mutex>{mPictQMutex}.unlock();
-        mPictQCond.notify_all();
+        mPictQCond.notify_one();
         return;
     }
 
@@ -1187,7 +1207,7 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
     {
         mPictQRead.store(read_idx, std::memory_order_release);
         std::unique_lock<std::mutex>{mPictQMutex}.unlock();
-        mPictQCond.notify_all();
+        mPictQCond.notify_one();
 
         /* allocate or resize the buffer! */
         bool fmt_updated{false};
@@ -1268,10 +1288,15 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
                 SDL_UnlockTexture(mImage);
             }
         }
+
+        redraw = true;
     }
 
-    /* Show the picture! */
-    display(screen, renderer);
+    if(redraw)
+    {
+        /* Show the picture! */
+        display(screen, renderer);
+    }
 
     if(updated)
     {
@@ -1287,65 +1312,66 @@ void VideoState::updateVideo(SDL_Window *screen, SDL_Renderer *renderer)
         {
             mFinalUpdate = true;
             std::unique_lock<std::mutex>{mPictQMutex}.unlock();
-            mPictQCond.notify_all();
+            mPictQCond.notify_one();
         }
     }
 }
 
 int VideoState::handler()
 {
+    std::for_each(mPictQ.begin(), mPictQ.end(),
+        [](Picture &pict) -> void
+        { pict.mFrame = AVFramePtr{av_frame_alloc()}; });
+
+    /* Prefill the codec buffer. */
+    do {
+        const int ret{mPackets.sendTo(mCodecCtx.get())};
+        if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            break;
+    } while(1);
+
     {
         std::lock_guard<std::mutex> _{mDispPtsMutex};
         mDisplayPtsTime = get_avtime();
     }
 
-    std::for_each(mPictQ.begin(), mPictQ.end(),
-        [](Picture &pict) -> void
-        { pict.mFrame = AVFramePtr{av_frame_alloc()}; });
-
+    auto current_pts = nanoseconds::zero();
     while(!mMovie.mQuit.load(std::memory_order_relaxed))
     {
         size_t write_idx{mPictQWrite.load(std::memory_order_relaxed)};
         Picture *vp{&mPictQ[write_idx]};
 
-        {
-            std::unique_lock<std::mutex> lock{mPackets.getMutex()};
-            AVPacket *lastpkt{};
-            while((lastpkt=mPackets.getPacket(lock)) != nullptr)
-            {
-                int ret{avcodec_send_packet(mCodecCtx.get(), lastpkt)};
-                if(ret == AVERROR(EAGAIN)) break;
-                mPackets.pop();
-            }
-            if(!lastpkt)
-                avcodec_send_packet(mCodecCtx.get(), nullptr);
-        }
-        /* Decode video frame */
+        /* Retrieve video frame. */
         AVFrame *decoded_frame{vp->mFrame.get()};
-        int ret{avcodec_receive_frame(mCodecCtx.get(), decoded_frame)};
-        if(ret == AVERROR_EOF) break;
-        if(ret < 0)
+        int ret;
+        while((ret=avcodec_receive_frame(mCodecCtx.get(), decoded_frame)) == AVERROR(EAGAIN))
+            mPackets.sendTo(mCodecCtx.get());
+        if(ret != 0)
         {
-            std::cerr<< "Failed to decode frame: "<<ret <<std::endl;
+            if(ret == AVERROR_EOF) break;
+            std::cerr<< "Failed to receive frame: "<<ret <<std::endl;
             continue;
         }
 
         /* Get the PTS for this frame. */
         if(decoded_frame->best_effort_timestamp != AV_NOPTS_VALUE)
-            mCurrentPts = std::chrono::duration_cast<nanoseconds>(
+            current_pts = std::chrono::duration_cast<nanoseconds>(
                 seconds_d64{av_q2d(mStream->time_base)*decoded_frame->best_effort_timestamp});
-        vp->mPts = mCurrentPts;
+        vp->mPts = current_pts;
 
         /* Update the video clock to the next expected PTS. */
         auto frame_delay = av_q2d(mCodecCtx->time_base);
         frame_delay += decoded_frame->repeat_pict * (frame_delay * 0.5);
-        mCurrentPts += std::chrono::duration_cast<nanoseconds>(seconds_d64{frame_delay});
+        current_pts += std::chrono::duration_cast<nanoseconds>(seconds_d64{frame_delay});
 
         /* Put the frame in the queue to be loaded into a texture and displayed
          * by the rendering thread.
          */
         write_idx = (write_idx+1)%mPictQ.size();
         mPictQWrite.store(write_idx, std::memory_order_release);
+
+        /* Send a packet now so it's hopefully ready by the time it's needed. */
+        mPackets.sendTo(mCodecCtx.get());
 
         if(write_idx == mPictQRead.load(std::memory_order_acquire))
         {
@@ -1760,6 +1786,7 @@ int main(int argc, char *argv[])
             last_time = cur_time;
         }
 
+        bool force_redraw{false};
         if(have_evt) do {
             switch(event.type)
             {
@@ -1787,6 +1814,11 @@ int main(int argc, char *argv[])
                         case SDL_WINDOWEVENT_RESIZED:
                             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
                             SDL_RenderFillRect(renderer, nullptr);
+                            force_redraw = true;
+                            break;
+
+                        case SDL_WINDOWEVENT_EXPOSED:
+                            force_redraw = true;
                             break;
 
                         default:
@@ -1835,7 +1867,7 @@ int main(int argc, char *argv[])
             }
         } while(SDL_PollEvent(&event));
 
-        movState->mVideo.updateVideo(screen, renderer);
+        movState->mVideo.updateVideo(screen, renderer, force_redraw);
     }
 
     std::cerr<< "SDL_WaitEvent error - "<<SDL_GetError() <<std::endl;
