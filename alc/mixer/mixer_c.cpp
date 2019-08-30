@@ -44,9 +44,8 @@ inline ALfloat do_bsinc(const InterpState &istate, const ALfloat *RESTRICT vals,
 using SamplerT = ALfloat(const InterpState&, const ALfloat*RESTRICT, const ALsizei);
 template<SamplerT &Sampler>
 const ALfloat *DoResample(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, ALfloat *RESTRICT dst, ALsizei numsamples)
+    ALsizei frac, ALint increment, const al::span<float> dst)
 {
-    ASSUME(numsamples > 0);
     ASSUME(increment > 0);
     ASSUME(frac >= 0);
 
@@ -61,49 +60,48 @@ const ALfloat *DoResample(const InterpState *state, const ALfloat *RESTRICT src,
 
         return ret;
     };
-    std::generate_n(dst, numsamples, proc_sample);
+    std::generate(dst.begin(), dst.end(), proc_sample);
 
-    return dst;
+    return dst.begin();
 }
 
 } // namespace
 
 template<>
 const ALfloat *Resample_<CopyTag,CTag>(const InterpState*, const ALfloat *RESTRICT src, ALsizei,
-    ALint, ALfloat *RESTRICT dst, ALsizei dstlen)
+    ALint, const al::span<float> dst)
 {
-    ASSUME(dstlen > 0);
 #if defined(HAVE_SSE) || defined(HAVE_NEON)
     /* Avoid copying the source data if it's aligned like the destination. */
-    if((reinterpret_cast<intptr_t>(src)&15) == (reinterpret_cast<intptr_t>(dst)&15))
+    if((reinterpret_cast<intptr_t>(src)&15) == (reinterpret_cast<intptr_t>(dst.data())&15))
         return src;
 #endif
-    std::copy_n(src, dstlen, dst);
-    return dst;
+    std::copy_n(src, dst.size(), dst.begin());
+    return dst.begin();
 }
 
 template<>
 const ALfloat *Resample_<PointTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, ALfloat *RESTRICT dst, ALsizei dstlen)
-{ return DoResample<do_point>(state, src, frac, increment, dst, dstlen); }
+    ALsizei frac, ALint increment, const al::span<float> dst)
+{ return DoResample<do_point>(state, src, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<LerpTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, ALfloat *RESTRICT dst, ALsizei dstlen)
-{ return DoResample<do_lerp>(state, src, frac, increment, dst, dstlen); }
+    ALsizei frac, ALint increment, const al::span<float> dst)
+{ return DoResample<do_lerp>(state, src, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<CubicTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, ALfloat *RESTRICT dst, ALsizei dstlen)
-{ return DoResample<do_cubic>(state, src-1, frac, increment, dst, dstlen); }
+    ALsizei frac, ALint increment, const al::span<float> dst)
+{ return DoResample<do_cubic>(state, src-1, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<BSincTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, ALfloat *RESTRICT dst, ALsizei dstlen)
-{ return DoResample<do_bsinc>(state, src-state->bsinc.l, frac, increment, dst, dstlen); }
+    ALsizei frac, ALint increment, const al::span<float> dst)
+{ return DoResample<do_bsinc>(state, src-state->bsinc.l, frac, increment, dst); }
 
 
-static inline void ApplyCoeffs(ALsizei /*Offset*/, float2 *RESTRICT Values, const ALsizei IrSize,
+static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const ALsizei IrSize,
     const HrirArray &Coeffs, const ALfloat left, const ALfloat right)
 {
     ASSUME(IrSize >= 2);
@@ -116,8 +114,8 @@ static inline void ApplyCoeffs(ALsizei /*Offset*/, float2 *RESTRICT Values, cons
 
 template<>
 void MixHrtf_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const ALsizei OutPos, const ALsizei IrSize,
-    MixHrtfFilter *hrtfparams, const ALsizei BufferSize)
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    MixHrtfFilter *hrtfparams, const size_t BufferSize)
 {
     MixHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
         hrtfparams, BufferSize);
@@ -125,8 +123,8 @@ void MixHrtf_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
 
 template<>
 void MixHrtfBlend_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const ALsizei OutPos, const ALsizei IrSize,
-    const HrtfFilter *oldparams, MixHrtfFilter *newparams, const ALsizei BufferSize)
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const HrtfFilter *oldparams, MixHrtfFilter *newparams, const size_t BufferSize)
 {
     MixHrtfBlendBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
         oldparams, newparams, BufferSize);
@@ -135,38 +133,36 @@ void MixHrtfBlend_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
 template<>
 void MixDirectHrtf_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples, DirectHrtfState *State,
-    const ALsizei BufferSize)
+    const size_t BufferSize)
 {
     MixDirectHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, State, BufferSize);
 }
 
 
 template<>
-void Mix_<CTag>(const ALfloat *data, const al::span<FloatBufferLine> OutBuffer,
-    ALfloat *CurrentGains, const ALfloat *TargetGains, const ALsizei Counter, const ALsizei OutPos,
-    const ALsizei BufferSize)
+void Mix_<CTag>(const al::span<const float> InSamples, const al::span<FloatBufferLine> OutBuffer,
+    float *CurrentGains, const float *TargetGains, const size_t Counter, const size_t OutPos)
 {
-    ASSUME(BufferSize > 0);
-
     const ALfloat delta{(Counter > 0) ? 1.0f / static_cast<ALfloat>(Counter) : 0.0f};
+    const bool reached_target{InSamples.size() >= Counter};
+    const auto min_end = reached_target ? InSamples.begin() + Counter : InSamples.end();
     for(FloatBufferLine &output : OutBuffer)
     {
-        ALfloat *RESTRICT dst{output.data()+OutPos};
+        ALfloat *RESTRICT dst{al::assume_aligned<16>(output.data()+OutPos)};
         ALfloat gain{*CurrentGains};
         const ALfloat diff{*TargetGains - gain};
 
-        ALsizei pos{0};
+        auto in_iter = InSamples.begin();
         if(std::fabs(diff) > std::numeric_limits<float>::epsilon())
         {
-            ALsizei minsize{mini(BufferSize, Counter)};
             const ALfloat step{diff * delta};
             ALfloat step_count{0.0f};
-            for(;pos < minsize;pos++)
+            while(in_iter != min_end)
             {
-                dst[pos] += data[pos] * (gain + step*step_count);
+                *(dst++) += *(in_iter++) * (gain + step*step_count);
                 step_count += 1.0f;
             }
-            if(pos == Counter)
+            if(reached_target)
                 gain = *TargetGains;
             else
                 gain += step*step_count;
@@ -177,8 +173,8 @@ void Mix_<CTag>(const ALfloat *data, const al::span<FloatBufferLine> OutBuffer,
 
         if(!(std::fabs(gain) > GAIN_SILENCE_THRESHOLD))
             continue;
-        for(;pos < BufferSize;pos++)
-            dst[pos] += data[pos]*gain;
+        while(in_iter != InSamples.end())
+            *(dst++) += *(in_iter++) * gain;
     }
 }
 
@@ -189,19 +185,18 @@ void Mix_<CTag>(const ALfloat *data, const al::span<FloatBufferLine> OutBuffer,
  * stepping is necessary.
  */
 template<>
-void MixRow_<CTag>(FloatBufferLine &OutBuffer, const ALfloat *Gains,
-    const al::span<const FloatBufferLine> InSamples, const ALsizei InPos, const ALsizei BufferSize)
+void MixRow_<CTag>(const al::span<float> OutBuffer, const al::span<const float> Gains,
+    const float *InSamples, const size_t InStride)
 {
-    ASSUME(BufferSize > 0);
-
-    for(const FloatBufferLine &input : InSamples)
+    for(const float gain : Gains)
     {
-        const ALfloat *RESTRICT src{input.data()+InPos};
-        const ALfloat gain{*(Gains++)};
+        const float *RESTRICT src{InSamples};
+        InSamples += InStride;
+
         if(!(std::fabs(gain) > GAIN_SILENCE_THRESHOLD))
             continue;
 
-        for(ALsizei i{0};i < BufferSize;i++)
-            OutBuffer[i] += src[i] * gain;
+        std::transform(OutBuffer.begin(), OutBuffer.end(), src, OutBuffer.begin(),
+            [gain](const ALfloat cur, const ALfloat src) -> ALfloat { return cur + src*gain; });
     }
 }

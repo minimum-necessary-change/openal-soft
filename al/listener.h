@@ -8,6 +8,7 @@
 #include "AL/alc.h"
 #include "AL/efx.h"
 
+#include "almalloc.h"
 #include "vecmat.h"
 
 enum class DistanceModel;
@@ -22,6 +23,8 @@ struct ALlistenerProps {
     ALfloat MetersPerUnit;
 
     std::atomic<ALlistenerProps*> next;
+
+    DEF_NEWDEL(ALlistenerProps)
 };
 
 struct ALlistener {
@@ -34,11 +37,12 @@ struct ALlistener {
 
     std::atomic_flag PropsClean;
 
-    /* Pointer to the most recent property values that are awaiting an update.
-     */
-    std::atomic<ALlistenerProps*> Update{nullptr};
-
     struct {
+        /* Pointer to the most recent property values that are awaiting an
+         * update.
+         */
+        std::atomic<ALlistenerProps*> Update{nullptr};
+
         alu::Matrix Matrix;
         alu::Vector Velocity;
 

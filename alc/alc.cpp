@@ -2322,14 +2322,14 @@ ALCcontext::~ALCcontext()
     if(cprops)
     {
         TRACE("Freed unapplied context update %p\n", cprops);
-        al_free(cprops);
+        delete cprops;
     }
     size_t count{0};
     cprops = mFreeContextProps.exchange(nullptr, std::memory_order_acquire);
     while(cprops)
     {
         ALcontextProps *next{cprops->next.load(std::memory_order_relaxed)};
-        al_free(cprops);
+        delete cprops;
         cprops = next;
         ++count;
     }
@@ -2350,7 +2350,7 @@ ALCcontext::~ALCcontext()
     {
         ALeffectslotProps *next{eprops->next.load(std::memory_order_relaxed)};
         if(eprops->State) eprops->State->release();
-        al_free(eprops);
+        delete eprops;
         eprops = next;
         ++count;
     }
@@ -2382,18 +2382,18 @@ ALCcontext::~ALCcontext()
     mVoices = nullptr;
     mVoiceCount.store(0, std::memory_order_relaxed);
 
-    ALlistenerProps *lprops{mListener.Update.exchange(nullptr, std::memory_order_relaxed)};
+    ALlistenerProps *lprops{mListener.Params.Update.exchange(nullptr, std::memory_order_relaxed)};
     if(lprops)
     {
         TRACE("Freed unapplied listener update %p\n", lprops);
-        al_free(lprops);
+        delete lprops;
     }
     count = 0;
     lprops = mFreeListenerProps.exchange(nullptr, std::memory_order_acquire);
     while(lprops)
     {
         ALlistenerProps *next{lprops->next.load(std::memory_order_relaxed)};
-        al_free(lprops);
+        delete lprops;
         lprops = next;
         ++count;
     }
@@ -4074,7 +4074,7 @@ START_API_FUNC
         alcSetError(dev.get(), ALC_INVALID_VALUE);
     else
     {
-        BackendLockGuard _{*device->Backend};
+        BackendLockGuard _{*dev->Backend};
         aluMixData(dev.get(), buffer, samples);
     }
 }

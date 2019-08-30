@@ -80,9 +80,8 @@ union InterpState {
     BsincState bsinc;
 };
 
-using ResamplerFunc = const ALfloat*(*)(const InterpState *state,
-    const ALfloat *RESTRICT src, ALsizei frac, ALint increment,
-    ALfloat *RESTRICT dst, ALsizei dstlen);
+using ResamplerFunc = const ALfloat*(*)(const InterpState *state, const ALfloat *RESTRICT src,
+    ALsizei frac, ALint increment, const al::span<float> dst);
 
 void BsincPrepare(const ALuint increment, BsincState *state, const BSincTable *table);
 
@@ -314,21 +313,20 @@ struct ALvoice {
 };
 
 
-using MixerFunc = void(*)(const ALfloat *data, const al::span<FloatBufferLine> OutBuffer,
-    ALfloat *CurrentGains, const ALfloat *TargetGains, const ALsizei Counter, const ALsizei OutPos,
-    const ALsizei BufferSize);
-using RowMixerFunc = void(*)(FloatBufferLine &OutBuffer, const ALfloat *gains,
-    const al::span<const FloatBufferLine> InSamples, const ALsizei InPos,
-    const ALsizei BufferSize);
+using MixerFunc = void(*)(const al::span<const float> InSamples,
+    const al::span<FloatBufferLine> OutBuffer, float *CurrentGains, const float *TargetGains,
+    const size_t Counter, const size_t OutPos);
+using RowMixerFunc = void(*)(const al::span<float> OutBuffer, const al::span<const float> Gains,
+    const float *InSamples, const size_t InStride);
 using HrtfMixerFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const ALsizei OutPos, const ALsizei IrSize,
-    MixHrtfFilter *hrtfparams, const ALsizei BufferSize);
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    MixHrtfFilter *hrtfparams, const size_t BufferSize);
 using HrtfMixerBlendFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const ALsizei OutPos, const ALsizei IrSize,
-    const HrtfFilter *oldparams, MixHrtfFilter *newparams, const ALsizei BufferSize);
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const HrtfFilter *oldparams, MixHrtfFilter *newparams, const size_t BufferSize);
 using HrtfDirectMixerFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples, DirectHrtfState *State,
-    const ALsizei BufferSize);
+    const size_t BufferSize);
 
 
 #define GAIN_MIX_MAX  (1000.0f) /* +60dB */
@@ -446,9 +444,9 @@ inline std::array<ALfloat,MAX_AMBI_CHANNELS> GetAmbiIdentityRow(size_t i) noexce
 }
 
 
-void MixVoice(ALvoice *voice, ALvoice::State vstate, const ALuint SourceID, ALCcontext *Context, const ALsizei SamplesToDo);
+void MixVoice(ALvoice *voice, ALvoice::State vstate, const ALuint SourceID, ALCcontext *Context, const ALuint SamplesToDo);
 
-void aluMixData(ALCdevice *device, ALvoid *OutBuffer, ALsizei NumSamples);
+void aluMixData(ALCdevice *device, ALvoid *OutBuffer, const ALuint NumSamples);
 /* Caller must lock the device state, and the mixer must not be running. */
 void aluHandleDisconnect(ALCdevice *device, const char *msg, ...) DECL_FORMAT(printf, 2, 3);
 
