@@ -31,7 +31,7 @@ constexpr ALfloat Ambi3DDecoderHFScale3O[MAX_AMBI_ORDER+1] = {
     5.89792205e-01f, 8.79693856e-01f
 };
 
-inline auto GetDecoderHFScales(ALsizei order) noexcept -> const ALfloat(&)[MAX_AMBI_ORDER+1]
+inline auto GetDecoderHFScales(ALuint order) noexcept -> const ALfloat(&)[MAX_AMBI_ORDER+1]
 {
     if(order >= 3) return Ambi3DDecoderHFScale3O;
     if(order == 2) return Ambi3DDecoderHFScale2O;
@@ -49,7 +49,7 @@ inline auto GetAmbiScales(AmbDecScale scaletype) noexcept -> const std::array<fl
 
 
 BFormatDec::BFormatDec(const AmbDecConf *conf, const bool allow_2band, const ALuint inchans,
-    const ALuint srate, const ALsizei (&chanmap)[MAX_OUTPUT_CHANNELS])
+    const ALuint srate, const ALuint (&chanmap)[MAX_OUTPUT_CHANNELS])
 {
     mDualBand = allow_2band && (conf->FreqBands == 2);
     if(!mDualBand)
@@ -64,7 +64,7 @@ BFormatDec::BFormatDec(const AmbDecConf *conf, const bool allow_2band, const ALu
     mNumChannels = inchans;
 
     mEnabled = std::accumulate(std::begin(chanmap), std::begin(chanmap)+conf->Speakers.size(), 0u,
-        [](ALuint mask, const ALsizei &chan) noexcept -> ALuint
+        [](ALuint mask, const ALuint &chan) noexcept -> ALuint
         { return mask | (1 << chan); }
     );
 
@@ -120,21 +120,20 @@ BFormatDec::BFormatDec(const AmbDecConf *conf, const bool allow_2band, const ALu
 
 BFormatDec::BFormatDec(const ALuint inchans, const ALsizei chancount,
     const ChannelDec (&chancoeffs)[MAX_OUTPUT_CHANNELS],
-    const ALsizei (&chanmap)[MAX_OUTPUT_CHANNELS])
+    const ALuint (&chanmap)[MAX_OUTPUT_CHANNELS])
 {
     mSamples.resize(2);
     mNumChannels = inchans;
 
     ASSUME(chancount > 0);
     mEnabled = std::accumulate(std::begin(chanmap), std::begin(chanmap)+chancount, 0u,
-        [](ALuint mask, const ALsizei &chan) noexcept -> ALuint
+        [](ALuint mask, const ALuint &chan) noexcept -> ALuint
         { return mask | (1 << chan); }
     );
 
     const ChannelDec *incoeffs{chancoeffs};
-    auto set_coeffs = [this,inchans,&incoeffs](const ALsizei chanidx) noexcept -> void
+    auto set_coeffs = [this,inchans,&incoeffs](const ALuint chanidx) noexcept -> void
     {
-        ASSUME(chanidx >= 0);
         ALfloat (&mtx)[MAX_AMBI_CHANNELS] = mMatrix.Single[chanidx];
         const ALfloat (&coeffs)[MAX_AMBI_CHANNELS] = *(incoeffs++);
 
@@ -188,17 +187,16 @@ void BFormatDec::process(const al::span<FloatBufferLine> OutBuffer,
 }
 
 
-std::array<ALfloat,MAX_AMBI_ORDER+1> BFormatDec::GetHFOrderScales(const ALsizei in_order, const ALsizei out_order) noexcept
+std::array<ALfloat,MAX_AMBI_ORDER+1> BFormatDec::GetHFOrderScales(const ALuint in_order, const ALuint out_order) noexcept
 {
     std::array<ALfloat,MAX_AMBI_ORDER+1> ret{};
 
     assert(out_order >= in_order);
-    ASSUME(out_order >= in_order);
 
     const ALfloat (&target)[MAX_AMBI_ORDER+1] = GetDecoderHFScales(out_order);
     const ALfloat (&input)[MAX_AMBI_ORDER+1] = GetDecoderHFScales(in_order);
 
-    for(ALsizei i{0};i < in_order+1;++i)
+    for(ALuint i{0};i < in_order+1;++i)
         ret[i] = input[i] / target[i];
 
     return ret;

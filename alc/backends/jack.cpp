@@ -162,8 +162,8 @@ struct JackPlayback final : public BackendBase {
     int mixerProc();
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean reset() override;
-    ALCboolean start() override;
+    bool reset() override;
+    bool start() override;
     void stop() override;
     ClockLatency getClockLatency() override;
 
@@ -235,7 +235,7 @@ int JackPlayback::process(jack_nframes_t numframes)
     }
 
     auto data = mRing->getReadVector();
-    jack_nframes_t todo{minu(numframes, data.first.len)};
+    jack_nframes_t todo{minu(numframes, static_cast<ALuint>(data.first.len))};
     std::transform(out, out+numchans, out,
         [&data,numchans,todo](ALfloat *outbuf) -> ALfloat*
         {
@@ -254,7 +254,7 @@ int JackPlayback::process(jack_nframes_t numframes)
     );
     jack_nframes_t total{todo};
 
-    todo = minu(numframes-total, data.second.len);
+    todo = minu(numframes-total, static_cast<ALuint>(data.second.len));
     if(todo > 0)
     {
         std::transform(out, out+numchans, out,
@@ -315,8 +315,8 @@ int JackPlayback::mixerProc()
         auto todo = static_cast<ALuint>(data.first.len + data.second.len);
         todo -= todo%mDevice->UpdateSize;
 
-        ALuint len1{minu(data.first.len, todo)};
-        ALuint len2{minu(data.second.len, todo-len1)};
+        ALuint len1{minu(static_cast<ALuint>(data.first.len), todo)};
+        ALuint len2{minu(static_cast<ALuint>(data.second.len), todo-len1)};
 
         aluMixData(mDevice, data.first.buf, len1);
         if(len2 > 0)
@@ -359,7 +359,7 @@ ALCenum JackPlayback::open(const ALCchar *name)
     return ALC_NO_ERROR;
 }
 
-ALCboolean JackPlayback::reset()
+bool JackPlayback::reset()
 {
     std::for_each(std::begin(mPort), std::end(mPort),
         [this](jack_port_t *port) -> void
@@ -382,8 +382,7 @@ ALCboolean JackPlayback::reset()
     /* Force 32-bit float output. */
     mDevice->FmtType = DevFmtFloat;
 
-    ALsizei numchans{mDevice->channelsFromFmt()};
-    auto ports_end = std::begin(mPort) + numchans;
+    auto ports_end = std::begin(mPort) + mDevice->channelsFromFmt();
     auto bad_port = std::find_if_not(std::begin(mPort), ports_end,
         [this](jack_port_t *&port) -> bool
         {
@@ -396,7 +395,7 @@ ALCboolean JackPlayback::reset()
     if(bad_port != ports_end)
     {
         ERR("Not enough JACK ports available for %s output\n", DevFmtChannelsString(mDevice->FmtChans));
-        if(bad_port == std::begin(mPort)) return ALC_FALSE;
+        if(bad_port == std::begin(mPort)) return false;
 
         if(bad_port == std::begin(mPort)+1)
             mDevice->FmtChans = DevFmtMono;
@@ -410,7 +409,6 @@ ALCboolean JackPlayback::reset()
             }
             mDevice->FmtChans = DevFmtStereo;
         }
-        numchans = std::distance(std::begin(mPort), bad_port);
     }
 
     mRing = nullptr;
@@ -418,20 +416,20 @@ ALCboolean JackPlayback::reset()
     if(!mRing)
     {
         ERR("Failed to allocate ringbuffer\n");
-        return ALC_FALSE;
+        return false;
     }
 
     SetDefaultChannelOrder(mDevice);
 
-    return ALC_TRUE;
+    return true;
 }
 
-ALCboolean JackPlayback::start()
+bool JackPlayback::start()
 {
     if(jack_activate(mClient))
     {
         ERR("Failed to activate client\n");
-        return ALC_FALSE;
+        return false;
     }
 
     const char **ports{jack_get_ports(mClient, nullptr, nullptr,
@@ -440,7 +438,7 @@ ALCboolean JackPlayback::start()
     {
         ERR("No physical playback ports found\n");
         jack_deactivate(mClient);
-        return ALC_FALSE;
+        return false;
     }
     std::mismatch(std::begin(mPort), std::end(mPort), ports,
         [this](const jack_port_t *port, const char *pname) -> bool
@@ -462,7 +460,7 @@ ALCboolean JackPlayback::start()
     try {
         mKillNow.store(false, std::memory_order_release);
         mThread = std::thread{std::mem_fn(&JackPlayback::mixerProc), this};
-        return ALC_TRUE;
+        return true;
     }
     catch(std::exception& e) {
         ERR("Could not create playback thread: %s\n", e.what());
@@ -470,7 +468,7 @@ ALCboolean JackPlayback::start()
     catch(...) {
     }
     jack_deactivate(mClient);
-    return ALC_FALSE;
+    return false;
 }
 
 void JackPlayback::stop()

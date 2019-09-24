@@ -8,15 +8,14 @@
 #include "opthelpers.h"
 
 
-using ApplyCoeffsT = void(size_t Offset, float2 *RESTRICT Values, const ALsizei irSize,
+using ApplyCoeffsT = void(size_t Offset, float2 *RESTRICT Values, const ALuint irSize,
     const HrirArray &Coeffs, const ALfloat left, const ALfloat right);
 
 template<ApplyCoeffsT &ApplyCoeffs>
 inline void MixHrtfBase(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
     const ALfloat *InSamples, float2 *RESTRICT AccumSamples, const size_t OutPos,
-    const ALsizei IrSize, MixHrtfFilter *hrtfparams, const size_t BufferSize)
+    const ALuint IrSize, MixHrtfFilter *hrtfparams, const size_t BufferSize)
 {
-    ASSUME(IrSize >= 4);
     ASSUME(BufferSize > 0);
 
     const HrirArray &Coeffs = *hrtfparams->Coeffs;
@@ -49,7 +48,7 @@ inline void MixHrtfBase(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
 template<ApplyCoeffsT &ApplyCoeffs>
 inline void MixHrtfBlendBase(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
     const ALfloat *InSamples, float2 *RESTRICT AccumSamples, const size_t OutPos,
-    const ALsizei IrSize, const HrtfFilter *oldparams, MixHrtfFilter *newparams,
+    const ALuint IrSize, const HrtfFilter *oldparams, MixHrtfFilter *newparams,
     const size_t BufferSize)
 {
     const auto &OldCoeffs = oldparams->Coeffs;
@@ -58,7 +57,6 @@ inline void MixHrtfBlendBase(FloatBufferLine &LeftOut, FloatBufferLine &RightOut
     const auto &NewCoeffs = *newparams->Coeffs;
     const ALfloat newGainStep{newparams->GainStep};
 
-    ASSUME(IrSize >= 4);
     ASSUME(BufferSize > 0);
 
     ALsizei Delay[2]{
@@ -105,32 +103,27 @@ inline void MixDirectHrtfBase(FloatBufferLine &LeftOut, FloatBufferLine &RightOu
 {
     ASSUME(BufferSize > 0);
 
-    const ALsizei IrSize{State->IrSize};
-    ASSUME(IrSize >= 4);
+    const ALuint IrSize{State->IrSize};
 
-    auto chanstate = State->Chan.begin();
+    auto accum_iter = std::copy_n(State->Values.begin(), State->Values.size(), AccumSamples);
+    std::fill_n(accum_iter, BufferSize, float2{});
+
+    auto coeff_iter = State->Coeffs.begin();
     for(const FloatBufferLine &input : InSamples)
     {
-        const auto &Coeffs = chanstate->Coeffs;
-
-        auto accum_iter = std::copy_n(chanstate->Values.begin(),
-            chanstate->Values.size(), AccumSamples);
-        std::fill_n(accum_iter, BufferSize, float2{});
-
+        const auto &Coeffs = *(coeff_iter++);
         for(size_t i{0u};i < BufferSize;++i)
         {
             const ALfloat insample{input[i]};
             ApplyCoeffs(i, AccumSamples+i, IrSize, Coeffs, insample, insample);
         }
-        for(size_t i{0u};i < BufferSize;++i)
-            LeftOut[i]  += AccumSamples[i][0];
-        for(size_t i{0u};i < BufferSize;++i)
-            RightOut[i] += AccumSamples[i][1];
-
-        std::copy_n(AccumSamples + BufferSize, chanstate->Values.size(),
-            chanstate->Values.begin());
-        ++chanstate;
     }
+    for(size_t i{0u};i < BufferSize;++i)
+        LeftOut[i]  += AccumSamples[i][0];
+    for(size_t i{0u};i < BufferSize;++i)
+        RightOut[i] += AccumSamples[i][1];
+
+    std::copy_n(AccumSamples + BufferSize, State->Values.size(), State->Values.begin());
 }
 
 #endif /* MIXER_HRTFBASE_H */

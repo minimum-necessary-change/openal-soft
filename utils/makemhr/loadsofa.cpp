@@ -21,13 +21,20 @@
  * Or visit:  http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
  */
 
+#include "loadsofa.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <iterator>
 #include <memory>
 #include <numeric>
-#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "makemhr.h"
 
 #include "mysofa.h"
-
-#include "loadsofa.h"
 
 
 static const char *SofaErrorStr(int err)
@@ -50,7 +57,7 @@ static const char *SofaErrorStr(int err)
  * of other axes as necessary.  The epsilons are used to constrain the
  * equality of unique elements.
  */
-static uint GetUniquelySortedElems(const uint m, const float *triplets, const int axis,
+static uint GetUniquelySortedElems(const uint m, const float *triplets, const uint axis,
     const double *const (&filters)[3], const double (&epsilons)[3], float *elems)
 {
     uint count{0u};
@@ -101,7 +108,6 @@ static float GetUniformStepSize(const double epsilon, const uint m, const float 
 {
     auto steps = std::vector<float>(m, 0.0f);
     auto counts = std::vector<uint>(m, 0u);
-    float step{0.0f};
     uint count{0u};
 
     for(uint stride{1u};stride < m/2;stride++)
@@ -140,15 +146,12 @@ static float GetUniformStepSize(const double epsilon, const uint m, const float 
         count = 1;
 
         if(counts[0] > m/2)
-        {
-            step = steps[0];
-            return step;
-        }
+            return steps[0];
     }
 
     if(counts[0] > 5)
-        step = steps[0];
-    return step;
+        return steps[0];
+    return 0.0f;
 }
 
 /* Attempts to produce a compatible layout.  Most data sets tend to be
@@ -220,10 +223,11 @@ static bool PrepareLayout(const uint m, const float *xyzs, HrirDataT *hData)
         {
             float ev{90.0f + elems[ei]};
             float eif{std::round(ev / step)};
+            const uint ei_start{static_cast<uint>(eif)};
 
-            if(std::fabs(eif - (uint)eif) < (0.1f / step))
+            if(std::fabs(eif - static_cast<float>(ei_start)) < (0.1f/step))
             {
-                evStart = static_cast<uint>(eif);
+                evStart = ei_start;
                 break;
             }
         }
@@ -432,8 +436,8 @@ static double CalcHrirOnset(const uint rate, const uint n, std::vector<double> &
     }
 
     double mag{std::accumulate(upsampled.cbegin(), upsampled.cend(), double{0.0},
-        [](const double mag, const double sample) -> double
-        { return std::max(mag, std::abs(sample)); })};
+        [](const double magnitude, const double sample) -> double
+        { return std::max(magnitude, std::abs(sample)); })};
 
     mag *= 0.15;
     auto iter = std::find_if(upsampled.cbegin(), upsampled.cend(),
@@ -491,14 +495,14 @@ static bool LoadResponses(MYSOFA_HRTF *sofaHrtf, HrirDataT *hData)
         if(field == hData->mFds.cend())
             continue;
 
-        double ef{(90.0+aer[1]) * (field->mEvCount-1) / 180.0};
+        double ef{(90.0+aer[1]) / 180.0 * (field->mEvCount-1)};
         auto ei = static_cast<int>(std::round(ef));
-        ef = (ef-ei) * 180.0f / (field->mEvCount-1);
+        ef = (ef-ei) * 180.0 / (field->mEvCount-1);
         if(std::abs(ef) >= 0.1) continue;
 
-        double af{aer[0] * field->mEvs[ei].mAzCount / 360.0f};
+        double af{aer[0] / 360.0 * field->mEvs[ei].mAzCount};
         auto ai = static_cast<int>(std::round(af));
-        af = (af-ai) * 360.0f / field->mEvs[ei].mAzCount;
+        af = (af-ai) * 360.0 / field->mEvs[ei].mAzCount;
         ai %= field->mEvs[ei].mAzCount;
         if(std::abs(af) >= 0.1) continue;
 
@@ -545,14 +549,9 @@ bool LoadSofaFile(const char *filename, const uint fftSize, const uint truncSize
         return false;
     }
 
+    /* NOTE: Some valid SOFA files are failing this check. */
     err = mysofa_check(sofaHrtf.get());
     if(err != MYSOFA_OK)
-/* NOTE: Some valid SOFA files are failing this check.
-    {
-        fprintf(stdout, "Error: Malformed source file '%s' (%s).\n", filename, SofaErrorStr(err));
-        return false;
-    }
-*/
         fprintf(stderr, "Warning: Supposedly malformed source file '%s' (%s).\n", filename,
             SofaErrorStr(err));
 
@@ -593,8 +592,8 @@ bool LoadSofaFile(const char *filename, const uint fftSize, const uint truncSize
     /* Assume a default head radius of 9cm. */
     hData->mRadius = 0.09;
 
-    if(!PrepareSampleRate(sofaHrtf.get(), hData) || !PrepareDelay(sofaHrtf.get(), hData) ||
-       !CheckIrData(sofaHrtf.get()))
+    if(!PrepareSampleRate(sofaHrtf.get(), hData) || !PrepareDelay(sofaHrtf.get(), hData)
+        || !CheckIrData(sofaHrtf.get()))
         return false;
     if(!PrepareLayout(sofaHrtf->M, sofaHrtf->SourcePosition.values, hData))
         return false;

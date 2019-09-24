@@ -13,42 +13,40 @@
 
 namespace {
 
-inline ALfloat do_point(const InterpState&, const ALfloat *RESTRICT vals, const ALsizei)
+inline ALfloat do_point(const InterpState&, const ALfloat *RESTRICT vals, const ALuint)
 { return vals[0]; }
-inline ALfloat do_lerp(const InterpState&, const ALfloat *RESTRICT vals, const ALsizei frac)
-{ return lerp(vals[0], vals[1], frac * (1.0f/FRACTIONONE)); }
-inline ALfloat do_cubic(const InterpState&, const ALfloat *RESTRICT vals, const ALsizei frac)
-{ return cubic(vals[0], vals[1], vals[2], vals[3], frac * (1.0f/FRACTIONONE)); }
-inline ALfloat do_bsinc(const InterpState &istate, const ALfloat *RESTRICT vals, const ALsizei frac)
+inline ALfloat do_lerp(const InterpState&, const ALfloat *RESTRICT vals, const ALuint frac)
+{ return lerp(vals[0], vals[1], static_cast<float>(frac)*(1.0f/FRACTIONONE)); }
+inline ALfloat do_cubic(const InterpState&, const ALfloat *RESTRICT vals, const ALuint frac)
+{ return cubic(vals[0], vals[1], vals[2], vals[3], static_cast<float>(frac)*(1.0f/FRACTIONONE)); }
+inline ALfloat do_bsinc(const InterpState &istate, const ALfloat *RESTRICT vals, const ALuint frac)
 {
-    ASSUME(istate.bsinc.m > 0);
+    const size_t m{istate.bsinc.m};
 
     // Calculate the phase index and factor.
 #define FRAC_PHASE_BITDIFF (FRACTIONBITS-BSINC_PHASE_BITS)
-    const ALsizei pi{frac >> FRAC_PHASE_BITDIFF};
-    const ALfloat pf{(frac & ((1<<FRAC_PHASE_BITDIFF)-1)) * (1.0f/(1<<FRAC_PHASE_BITDIFF))};
+    const ALuint pi{frac >> FRAC_PHASE_BITDIFF};
+    const ALfloat pf{static_cast<float>(frac & ((1<<FRAC_PHASE_BITDIFF)-1)) *
+        (1.0f/(1<<FRAC_PHASE_BITDIFF))};
 #undef FRAC_PHASE_BITDIFF
 
-    const ALfloat *fil{istate.bsinc.filter + istate.bsinc.m*pi*4};
-    const ALfloat *scd{fil + istate.bsinc.m};
-    const ALfloat *phd{scd + istate.bsinc.m};
-    const ALfloat *spd{phd + istate.bsinc.m};
+    const ALfloat *fil{istate.bsinc.filter + m*pi*4};
+    const ALfloat *scd{fil + m};
+    const ALfloat *phd{scd + m};
+    const ALfloat *spd{phd + m};
 
     // Apply the scale and phase interpolated filter.
     ALfloat r{0.0f};
-    for(ALsizei j_f{0};j_f < istate.bsinc.m;j_f++)
+    for(size_t j_f{0};j_f < m;j_f++)
         r += (fil[j_f] + istate.bsinc.sf*scd[j_f] + pf*(phd[j_f] + istate.bsinc.sf*spd[j_f])) * vals[j_f];
     return r;
 }
 
-using SamplerT = ALfloat(const InterpState&, const ALfloat*RESTRICT, const ALsizei);
+using SamplerT = ALfloat(const InterpState&, const ALfloat*RESTRICT, const ALuint);
 template<SamplerT &Sampler>
 const ALfloat *DoResample(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 {
-    ASSUME(increment > 0);
-    ASSUME(frac >= 0);
-
     const InterpState istate{*state};
     auto proc_sample = [&src,&frac,istate,increment]() -> ALfloat
     {
@@ -68,8 +66,8 @@ const ALfloat *DoResample(const InterpState *state, const ALfloat *RESTRICT src,
 } // namespace
 
 template<>
-const ALfloat *Resample_<CopyTag,CTag>(const InterpState*, const ALfloat *RESTRICT src, ALsizei,
-    ALint, const al::span<float> dst)
+const ALfloat *Resample_<CopyTag,CTag>(const InterpState*, const ALfloat *RESTRICT src, ALuint,
+    ALuint, const al::span<float> dst)
 {
 #if defined(HAVE_SSE) || defined(HAVE_NEON)
     /* Avoid copying the source data if it's aligned like the destination. */
@@ -82,30 +80,30 @@ const ALfloat *Resample_<CopyTag,CTag>(const InterpState*, const ALfloat *RESTRI
 
 template<>
 const ALfloat *Resample_<PointTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 { return DoResample<do_point>(state, src, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<LerpTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 { return DoResample<do_lerp>(state, src, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<CubicTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 { return DoResample<do_cubic>(state, src-1, frac, increment, dst); }
 
 template<>
 const ALfloat *Resample_<BSincTag,CTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 { return DoResample<do_bsinc>(state, src-state->bsinc.l, frac, increment, dst); }
 
 
-static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const ALsizei IrSize,
+static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const ALuint IrSize,
     const HrirArray &Coeffs, const ALfloat left, const ALfloat right)
 {
-    ASSUME(IrSize >= 2);
-    for(ALsizei c{0};c < IrSize;++c)
+    ASSUME(IrSize >= 4);
+    for(ALuint c{0};c < IrSize;++c)
     {
         Values[c][0] += Coeffs[c][0] * left;
         Values[c][1] += Coeffs[c][1] * right;
@@ -114,7 +112,7 @@ static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const
 
 template<>
 void MixHrtf_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     MixHrtfFilter *hrtfparams, const size_t BufferSize)
 {
     MixHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
@@ -123,7 +121,7 @@ void MixHrtf_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
 
 template<>
 void MixHrtfBlend_<CTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     const HrtfFilter *oldparams, MixHrtfFilter *newparams, const size_t BufferSize)
 {
     MixHrtfBlendBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
@@ -190,13 +188,14 @@ void MixRow_<CTag>(const al::span<float> OutBuffer, const al::span<const float> 
 {
     for(const float gain : Gains)
     {
-        const float *RESTRICT src{InSamples};
+        const float *RESTRICT input{InSamples};
         InSamples += InStride;
 
         if(!(std::fabs(gain) > GAIN_SILENCE_THRESHOLD))
             continue;
 
-        std::transform(OutBuffer.begin(), OutBuffer.end(), src, OutBuffer.begin(),
-            [gain](const ALfloat cur, const ALfloat src) -> ALfloat { return cur + src*gain; });
+        auto do_mix = [gain](const float cur, const float src) noexcept -> float
+        { return cur + src*gain; };
+        std::transform(OutBuffer.begin(), OutBuffer.end(), input, OutBuffer.begin(), do_mix);
     }
 }

@@ -28,10 +28,10 @@ BackendBase::BackendBase(ALCdevice *device) noexcept : mDevice{device}
 
 BackendBase::~BackendBase() = default;
 
-ALCboolean BackendBase::reset()
-{ return ALC_FALSE; }
+bool BackendBase::reset()
+{ return false; }
 
-ALCenum BackendBase::captureSamples(void*, ALCuint)
+ALCenum BackendBase::captureSamples(al::byte*, ALCuint)
 { return ALC_INVALID_DEVICE; }
 
 ALCuint BackendBase::availableSamples()
@@ -53,7 +53,8 @@ ClockLatency BackendBase::getClockLatency()
      * any given time during playback. Without a more accurate measurement from
      * the output, this is an okay approximation.
      */
-    ret.Latency  = std::chrono::seconds{maxi(mDevice->BufferSize-mDevice->UpdateSize, 0)};
+    ret.Latency = std::max(std::chrono::seconds{mDevice->BufferSize-mDevice->UpdateSize},
+        std::chrono::seconds::zero());
     ret.Latency /= mDevice->Frequency;
 
     return ret;

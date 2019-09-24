@@ -81,6 +81,9 @@ DEFINE_PROPERTYKEY(PKEY_AudioEndpoint_GUID, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x
 
 namespace {
 
+inline constexpr REFERENCE_TIME operator "" _reftime(unsigned long long int n) noexcept
+{ return static_cast<REFERENCE_TIME>(n); }
+
 #define MONO SPEAKER_FRONT_CENTER
 #define STEREO (SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT)
 #define QUAD (SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT|SPEAKER_BACK_LEFT|SPEAKER_BACK_RIGHT)
@@ -90,7 +93,7 @@ namespace {
 #define X7DOT1 (SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT|SPEAKER_FRONT_CENTER|SPEAKER_LOW_FREQUENCY|SPEAKER_BACK_LEFT|SPEAKER_BACK_RIGHT|SPEAKER_SIDE_LEFT|SPEAKER_SIDE_RIGHT)
 #define X7DOT1_WIDE (SPEAKER_FRONT_LEFT|SPEAKER_FRONT_RIGHT|SPEAKER_FRONT_CENTER|SPEAKER_LOW_FREQUENCY|SPEAKER_BACK_LEFT|SPEAKER_BACK_RIGHT|SPEAKER_FRONT_LEFT_OF_CENTER|SPEAKER_FRONT_RIGHT_OF_CENTER)
 
-#define REFTIME_PER_SEC ((REFERENCE_TIME)10000000)
+#define REFTIME_PER_SEC 10000000_reftime
 
 #define DEVNAME_HEAD "OpenAL Soft on "
 
@@ -399,7 +402,7 @@ void TraceFormat(const char *msg, const WAVEFORMATEX *format)
 }
 
 
-enum class MsgType : unsigned int {
+enum class MsgType {
     OpenDevice,
     ResetDevice,
     StartDevice,
@@ -412,7 +415,7 @@ enum class MsgType : unsigned int {
     Count
 };
 
-constexpr char MessageStr[static_cast<unsigned int>(MsgType::Count)][20]{
+constexpr char MessageStr[static_cast<size_t>(MsgType::Count)][20]{
     "Open Device",
     "Reset Device",
     "Start Device",
@@ -426,6 +429,8 @@ constexpr char MessageStr[static_cast<unsigned int>(MsgType::Count)][20]{
 
 /* Proxy interface used by the message handler. */
 struct WasapiProxy {
+    virtual ~WasapiProxy() = default;
+
     virtual HRESULT openProxy() = 0;
     virtual void closeProxy() = 0;
 
@@ -517,8 +522,8 @@ int WasapiProxy::messageHandler(std::promise<HRESULT> *promise)
     while(popMessage(msg))
     {
         TRACE("Got message \"%s\" (0x%04x, this=%p)\n",
-            MessageStr[static_cast<unsigned int>(msg.mType)], static_cast<unsigned int>(msg.mType),
-            msg.mProxy);
+            MessageStr[static_cast<size_t>(msg.mType)], static_cast<int>(msg.mType),
+            decltype(std::declval<void*>()){msg.mProxy});
 
         switch(msg.mType)
         {
@@ -609,9 +614,9 @@ struct WasapiPlayback final : public BackendBase, WasapiProxy {
     HRESULT openProxy() override;
     void closeProxy() override;
 
-    ALCboolean reset() override;
+    bool reset() override;
     HRESULT resetProxy() override;
-    ALCboolean start() override;
+    bool start() override;
     HRESULT startProxy() override;
     void stop() override;
     void stopProxy() override;
@@ -807,10 +812,10 @@ void WasapiPlayback::closeProxy()
 }
 
 
-ALCboolean WasapiPlayback::reset()
+bool WasapiPlayback::reset()
 {
     HRESULT hr{pushMessage(MsgType::ResetDevice).get()};
-    return SUCCEEDED(hr) ? ALC_TRUE : ALC_FALSE;
+    return SUCCEEDED(hr) ? true : false;
 }
 
 HRESULT WasapiPlayback::resetProxy()
@@ -939,10 +944,10 @@ HRESULT WasapiPlayback::resetProxy()
     }
     OutputType.Format.nSamplesPerSec = mDevice->Frequency;
 
-    OutputType.Format.nBlockAlign = OutputType.Format.nChannels *
-                                    OutputType.Format.wBitsPerSample / 8;
+    OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels *
+        OutputType.Format.wBitsPerSample / 8);
     OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec *
-                                        OutputType.Format.nBlockAlign;
+        OutputType.Format.nBlockAlign;
 
     TraceFormat("Requesting playback format", &OutputType.Format);
     hr = mClient->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, &OutputType.Format, &wfx);
@@ -1037,8 +1042,8 @@ HRESULT WasapiPlayback::resetProxy()
         return hr;
     }
 
-    UINT32 buffer_len, min_len;
-    REFERENCE_TIME min_per;
+    UINT32 buffer_len{}, min_len{};
+    REFERENCE_TIME min_per{};
     hr = mClient->GetDevicePeriod(&min_per, nullptr);
     if(SUCCEEDED(hr))
         hr = mClient->GetBufferSize(&buffer_len);
@@ -1051,7 +1056,7 @@ HRESULT WasapiPlayback::resetProxy()
     /* Find the nearest multiple of the period size to the update size */
     if(min_per < per_time)
         min_per *= maxi64((per_time + min_per/2) / min_per, 1);
-    min_len = (UINT32)ScaleCeil(min_per, mDevice->Frequency, REFTIME_PER_SEC);
+    min_len = static_cast<UINT32>(ScaleCeil(min_per, mDevice->Frequency, REFTIME_PER_SEC));
     min_len = minu(min_len, buffer_len/2);
 
     mDevice->UpdateSize = min_len;
@@ -1068,10 +1073,10 @@ HRESULT WasapiPlayback::resetProxy()
 }
 
 
-ALCboolean WasapiPlayback::start()
+bool WasapiPlayback::start()
 {
     HRESULT hr{pushMessage(MsgType::StartDevice).get()};
-    return SUCCEEDED(hr) ? ALC_TRUE : ALC_FALSE;
+    return SUCCEEDED(hr) ? true : false;
 }
 
 HRESULT WasapiPlayback::startProxy()
@@ -1151,12 +1156,12 @@ struct WasapiCapture final : public BackendBase, WasapiProxy {
     void closeProxy() override;
 
     HRESULT resetProxy() override;
-    ALCboolean start() override;
+    bool start() override;
     HRESULT startProxy() override;
     void stop() override;
     void stopProxy() override;
 
-    ALCenum captureSamples(void *buffer, ALCuint samples) override;
+    ALCenum captureSamples(al::byte *buffer, ALCuint samples) override;
     ALCuint availableSamples() override;
 
     std::wstring mDevId;
@@ -1166,7 +1171,7 @@ struct WasapiCapture final : public BackendBase, WasapiProxy {
     IAudioCaptureClient *mCapture{nullptr};
     HANDLE mNotifyEvent{nullptr};
 
-    ChannelConverterPtr mChannelConv;
+    ChannelConverter mChannelConv{};
     SampleConverterPtr mSampleConv;
     RingBufferPtr mRing;
 
@@ -1216,10 +1221,10 @@ FORCE_ALIGN int WasapiCapture::recordProc()
                 ERR("Failed to get capture buffer: 0x%08lx\n", hr);
             else
             {
-                if(mChannelConv)
+                if(mChannelConv.is_active())
                 {
                     samples.resize(numsamples*2);
-                    mChannelConv->convert(rdata, samples.data(), numsamples);
+                    mChannelConv.convert(rdata, samples.data(), numsamples);
                     rdata = reinterpret_cast<BYTE*>(samples.data());
                 }
 
@@ -1409,7 +1414,7 @@ HRESULT WasapiCapture::resetProxy()
     REFERENCE_TIME buf_time{mDevice->BufferSize * REFTIME_PER_SEC / mDevice->Frequency};
     buf_time = maxu64(buf_time, REFTIME_PER_SEC/10);
 
-    WAVEFORMATEXTENSIBLE OutputType;
+    WAVEFORMATEXTENSIBLE OutputType{};
     OutputType.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
     switch(mDevice->FmtChans)
     {
@@ -1471,10 +1476,10 @@ HRESULT WasapiCapture::resetProxy()
     OutputType.Samples.wValidBitsPerSample = OutputType.Format.wBitsPerSample;
     OutputType.Format.nSamplesPerSec = mDevice->Frequency;
 
-    OutputType.Format.nBlockAlign = OutputType.Format.nChannels *
-                                    OutputType.Format.wBitsPerSample / 8;
+    OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels *
+        OutputType.Format.wBitsPerSample / 8);
     OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec *
-                                        OutputType.Format.nBlockAlign;
+        OutputType.Format.nBlockAlign;
     OutputType.Format.cbSize = sizeof(OutputType) - sizeof(OutputType.Format);
 
     TraceFormat("Requesting capture format", &OutputType.Format);
@@ -1487,7 +1492,7 @@ HRESULT WasapiCapture::resetProxy()
     }
 
     mSampleConv = nullptr;
-    mChannelConv = nullptr;
+    mChannelConv = {};
 
     if(wfx != nullptr)
     {
@@ -1546,12 +1551,7 @@ HRESULT WasapiCapture::resetProxy()
 
     if(mDevice->FmtChans == DevFmtMono && OutputType.Format.nChannels == 2)
     {
-        mChannelConv = CreateChannelConverter(srcType, DevFmtStereo, mDevice->FmtChans);
-        if(!mChannelConv)
-        {
-            ERR("Failed to create %s stereo-to-mono converter\n", DevFmtTypeString(srcType));
-            return E_FAIL;
-        }
+        mChannelConv = ChannelConverter{srcType, DevFmtStereo, mDevice->FmtChans};
         TRACE("Created %s stereo-to-mono converter\n", DevFmtTypeString(srcType));
         /* The channel converter always outputs float, so change the input type
          * for the resampler/type-converter.
@@ -1560,12 +1560,7 @@ HRESULT WasapiCapture::resetProxy()
     }
     else if(mDevice->FmtChans == DevFmtStereo && OutputType.Format.nChannels == 1)
     {
-        mChannelConv = CreateChannelConverter(srcType, DevFmtMono, mDevice->FmtChans);
-        if(!mChannelConv)
-        {
-            ERR("Failed to create %s mono-to-stereo converter\n", DevFmtTypeString(srcType));
-            return E_FAIL;
-        }
+        mChannelConv = ChannelConverter{srcType, DevFmtMono, mDevice->FmtChans};
         TRACE("Created %s mono-to-stereo converter\n", DevFmtTypeString(srcType));
         srcType = DevFmtFloat;
     }
@@ -1573,7 +1568,7 @@ HRESULT WasapiCapture::resetProxy()
     if(mDevice->Frequency != OutputType.Format.nSamplesPerSec || mDevice->FmtType != srcType)
     {
         mSampleConv = CreateSampleConverter(srcType, mDevice->FmtType, mDevice->channelsFromFmt(),
-            OutputType.Format.nSamplesPerSec, mDevice->Frequency, BSinc24Resampler);
+            OutputType.Format.nSamplesPerSec, mDevice->Frequency, Resampler::BSinc24);
         if(!mSampleConv)
         {
             ERR("Failed to create converter for %s format, dst: %s %uhz, src: %s %luhz\n",
@@ -1594,8 +1589,8 @@ HRESULT WasapiCapture::resetProxy()
         return hr;
     }
 
-    UINT32 buffer_len;
-    REFERENCE_TIME min_per;
+    UINT32 buffer_len{};
+    REFERENCE_TIME min_per{};
     hr = mClient->GetDevicePeriod(&min_per, nullptr);
     if(SUCCEEDED(hr))
         hr = mClient->GetBufferSize(&buffer_len);
@@ -1627,10 +1622,10 @@ HRESULT WasapiCapture::resetProxy()
 }
 
 
-ALCboolean WasapiCapture::start()
+bool WasapiCapture::start()
 {
     HRESULT hr{pushMessage(MsgType::StartDevice).get()};
-    return SUCCEEDED(hr) ? ALC_TRUE : ALC_FALSE;
+    return SUCCEEDED(hr) ? true : false;
 }
 
 HRESULT WasapiCapture::startProxy()
@@ -1690,9 +1685,9 @@ void WasapiCapture::stopProxy()
 
 
 ALCuint WasapiCapture::availableSamples()
-{ return (ALCuint)mRing->readSpace(); }
+{ return static_cast<ALCuint>(mRing->readSpace()); }
 
-ALCenum WasapiCapture::captureSamples(void *buffer, ALCuint samples)
+ALCenum WasapiCapture::captureSamples(al::byte *buffer, ALCuint samples)
 {
     mRing->read(buffer, samples);
     return ALC_NO_ERROR;

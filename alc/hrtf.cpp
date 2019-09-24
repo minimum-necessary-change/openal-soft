@@ -36,17 +36,18 @@
 #include <mutex>
 #include <new>
 #include <numeric>
+#include <type_traits>
 #include <utility>
 
 #include "AL/al.h"
 
 #include "alcmain.h"
 #include "alconfig.h"
+#include "alfstream.h"
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "aloptional.h"
 #include "alspan.h"
-#include "compat.h"
 #include "filters/splitter.h"
 #include "logging.h"
 #include "math_defs.h"
@@ -61,21 +62,11 @@ struct HrtfHandle {
     HrtfHandle(const HrtfHandle&) = delete;
     HrtfHandle& operator=(const HrtfHandle&) = delete;
 
-    static std::unique_ptr<HrtfHandle> Create(size_t fname_len);
-    static constexpr size_t Sizeof(size_t length) noexcept
-    {
-        return maxz(sizeof(HrtfHandle),
-            al::FlexArray<char>::Sizeof(length, offsetof(HrtfHandle, filename)));
-    }
+    static std::unique_ptr<HrtfHandle> Create(size_t fname_len)
+    { return std::unique_ptr<HrtfHandle>{new (FamCount{fname_len}) HrtfHandle{fname_len}}; }
 
-    DEF_PLACE_NEWDEL()
+    DEF_FAM_NEWDEL(HrtfHandle, filename)
 };
-
-std::unique_ptr<HrtfHandle> HrtfHandle::Create(size_t fname_len)
-{
-    void *ptr{al_calloc(alignof(HrtfHandle), HrtfHandle::Sizeof(fname_len))};
-    return std::unique_ptr<HrtfHandle>{new (ptr) HrtfHandle{fname_len}};
-}
 
 namespace {
 
@@ -169,10 +160,10 @@ class databuf final : public std::streambuf {
     }
 
 public:
-    databuf(const char_type *start, const char_type *end) noexcept
+    databuf(const char_type *start_, const char_type *end_) noexcept
     {
-        setg(const_cast<char_type*>(start), const_cast<char_type*>(start),
-             const_cast<char_type*>(end));
+        setg(const_cast<char_type*>(start_), const_cast<char_type*>(start_),
+             const_cast<char_type*>(end_));
     }
 };
 
@@ -180,8 +171,8 @@ class idstream final : public std::istream {
     databuf mStreamBuf;
 
 public:
-    idstream(const char *start, const char *end)
-      : std::istream{nullptr}, mStreamBuf{start, end}
+    idstream(const char *start_, const char *end_)
+      : std::istream{nullptr}, mStreamBuf{start_, end_}
     { init(&mStreamBuf); }
 };
 
@@ -192,10 +183,11 @@ struct IdxBlend { ALsizei idx; ALfloat blend; };
  */
 IdxBlend CalcEvIndex(ALsizei evcount, ALfloat ev)
 {
-    ev = (al::MathDefs<float>::Pi()*0.5f + ev) * (evcount-1) / al::MathDefs<float>::Pi();
+    ev = (al::MathDefs<float>::Pi()*0.5f + ev) * static_cast<float>(evcount-1) /
+        al::MathDefs<float>::Pi();
     ALsizei idx{float2int(ev)};
 
-    return IdxBlend{mini(idx, evcount-1), ev-idx};
+    return IdxBlend{mini(idx, evcount-1), ev-static_cast<float>(idx)};
 }
 
 /* Calculate the azimuth index given the polar azimuth in radians. This will
@@ -203,10 +195,11 @@ IdxBlend CalcEvIndex(ALsizei evcount, ALfloat ev)
  */
 IdxBlend CalcAzIndex(ALsizei azcount, ALfloat az)
 {
-    az = (al::MathDefs<float>::Tau()+az) * azcount / al::MathDefs<float>::Tau();
+    az = (al::MathDefs<float>::Tau()+az) * static_cast<float>(azcount) /
+        al::MathDefs<float>::Tau();
     ALsizei idx{float2int(az)};
 
-    return IdxBlend{idx%azcount, az-idx};
+    return IdxBlend{idx%azcount, az-static_cast<float>(idx)};
 }
 
 } // namespace
@@ -267,7 +260,7 @@ void GetHrtfCoeffs(const HrtfEntry *Hrtf, ALfloat elevation, ALfloat azimuth, AL
         Hrtf->delays[idx[2]][1]*blend[2] + Hrtf->delays[idx[3]][1]*blend[3]
     );
 
-    const ALsizei irSize{Hrtf->irSize};
+    const ALuint irSize{Hrtf->irSize};
     ASSUME(irSize >= MIN_IR_SIZE);
 
     /* Calculate the sample offsets for the HRIR indices. */
@@ -294,8 +287,7 @@ void GetHrtfCoeffs(const HrtfEntry *Hrtf, ALfloat elevation, ALfloat azimuth, AL
 
 std::unique_ptr<DirectHrtfState> DirectHrtfState::Create(size_t num_chans)
 {
-    void *ptr{al_calloc(16, DirectHrtfState::Sizeof(num_chans))};
-    return std::unique_ptr<DirectHrtfState>{new (ptr) DirectHrtfState{num_chans}};
+    return std::unique_ptr<DirectHrtfState>{new (FamCount{num_chans}) DirectHrtfState{num_chans}};
 }
 
 void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuint NumChannels,
@@ -314,30 +306,30 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
     ASSUME(NumChannels > 0);
     ASSUME(AmbiCount > 0);
 
-    auto &field = Hrtf->field[0];
-    ALsizei min_delay{HRTF_HISTORY_LENGTH};
-    ALsizei max_delay{0};
-    auto idx = al::vector<ALsizei>(AmbiCount);
-    auto calc_idxs = [Hrtf,&field,&max_delay,&min_delay](const AngularPoint &pt) noexcept -> ALsizei
+    ALuint min_delay{HRTF_HISTORY_LENGTH};
+    ALuint max_delay{0};
+    auto idx = al::vector<ALuint>(AmbiCount);
+    auto calc_idxs = [Hrtf,&max_delay,&min_delay](const AngularPoint &pt) noexcept -> ALuint
     {
+        auto &field = Hrtf->field[0];
         /* Calculate elevation index. */
-        const auto evidx = clampi(
-            static_cast<ALsizei>((90.0f+pt.Elev)*(field.evCount-1)/180.0f + 0.5f),
-            0, field.evCount-1);
+        const auto ev_limit = static_cast<float>(field.evCount-1);
+        const ALuint evidx{float2uint(clampf((90.0f+pt.Elev)/180.0f, 0.0f, 1.0f)*ev_limit + 0.5f)};
 
-        const ALsizei azcount{Hrtf->elev[evidx].azCount};
-        const ALsizei iroffset{Hrtf->elev[evidx].irOffset};
+        const ALuint azcount{Hrtf->elev[evidx].azCount};
+        const ALuint iroffset{Hrtf->elev[evidx].irOffset};
 
         /* Calculate azimuth index for this elevation. */
-        const auto azidx = static_cast<ALsizei>((360.0f+pt.Azim)*azcount/360.0f + 0.5f) % azcount;
+        const float az_norm{(360.0f+pt.Azim) / 360.0f};
+        const ALuint azidx{float2uint(az_norm*static_cast<float>(azcount) + 0.5f) % azcount};
 
         /* Calculate the index for the impulse response. */
-        ALsizei idx{iroffset + azidx};
+        const ALuint iridx{iroffset + azidx};
 
-        min_delay = mini(min_delay, mini(Hrtf->delays[idx][0], Hrtf->delays[idx][1]));
-        max_delay = maxi(max_delay, maxi(Hrtf->delays[idx][0], Hrtf->delays[idx][1]));
+        min_delay = minu(min_delay, minu(Hrtf->delays[iridx][0], Hrtf->delays[iridx][1]));
+        max_delay = maxu(max_delay, maxu(Hrtf->delays[iridx][0], Hrtf->delays[iridx][1]));
 
-        return idx;
+        return iridx;
     };
     std::transform(AmbiPoints, AmbiPoints+AmbiCount, idx.begin(), calc_idxs);
 
@@ -353,8 +345,8 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
     for(size_t c{0u};c < AmbiCount;++c)
     {
         const ALfloat (*fir)[2]{&Hrtf->coeffs[idx[c] * Hrtf->irSize]};
-        const ALsizei ldelay{Hrtf->delays[idx[c]][0] - min_delay + base_delay};
-        const ALsizei rdelay{Hrtf->delays[idx[c]][1] - min_delay + base_delay};
+        const ALuint ldelay{Hrtf->delays[idx[c]][0] - min_delay + base_delay};
+        const ALuint rdelay{Hrtf->delays[idx[c]][1] - min_delay + base_delay};
 
         if(!DualBand)
         {
@@ -363,9 +355,9 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
             {
                 const ALdouble mult{ALdouble{AmbiOrderHFGain[OrderFromChan[i]]} *
                     AmbiMatrix[c][i]};
-                const ALsizei numirs{mini(Hrtf->irSize, HRIR_LENGTH-maxi(ldelay, rdelay))};
-                ALsizei lidx{ldelay}, ridx{rdelay};
-                for(ALsizei j{0};j < numirs;++j)
+                const ALuint numirs{minu(Hrtf->irSize, HRIR_LENGTH-maxu(ldelay, rdelay))};
+                ALuint lidx{ldelay}, ridx{rdelay};
+                for(ALuint j{0};j < numirs;++j)
                 {
                     tmpres[i][lidx++][0] += fir[j][0] * mult;
                     tmpres[i][ridx++][1] += fir[j][1] * mult;
@@ -405,8 +397,8 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
         {
             const ALdouble mult{AmbiMatrix[c][i]};
             const ALdouble hfgain{AmbiOrderHFGain[OrderFromChan[i]]};
-            ALsizei j{HRIR_LENGTH*3 - ldelay};
-            for(ALsizei lidx{0};lidx < HRIR_LENGTH;++lidx,++j)
+            ALuint j{HRIR_LENGTH*3 - ldelay};
+            for(ALuint lidx{0};lidx < HRIR_LENGTH;++lidx,++j)
                 tmpres[i][lidx][0] += (tmpfilt[0][j]*hfgain + tmpfilt[1][j]) * mult;
         }
 
@@ -426,8 +418,8 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
         {
             const ALdouble mult{AmbiMatrix[c][i]};
             const ALdouble hfgain{AmbiOrderHFGain[OrderFromChan[i]]};
-            ALsizei j{HRIR_LENGTH*3 - rdelay};
-            for(ALsizei ridx{0};ridx < HRIR_LENGTH;++ridx,++j)
+            ALuint j{HRIR_LENGTH*3 - rdelay};
+            for(ALuint ridx{0};ridx < HRIR_LENGTH;++ridx,++j)
                 tmpres[i][ridx][1] += (tmpfilt[0][j]*hfgain + tmpfilt[1][j]) * mult;
         }
     }
@@ -438,38 +430,38 @@ void BuildBFormatHrtf(const HrtfEntry *Hrtf, DirectHrtfState *state, const ALuin
     {
         auto copy_arr = [](const std::array<double,2> &in) noexcept -> float2
         { return float2{{static_cast<float>(in[0]), static_cast<float>(in[1])}}; };
-        std::transform(tmpres[i].begin(), tmpres[i].end(), state->Chan[i].Coeffs.begin(),
+        std::transform(tmpres[i].begin(), tmpres[i].end(), state->Coeffs[i].begin(),
             copy_arr);
     }
     tmpres.clear();
 
-    ALsizei max_length{HRIR_LENGTH};
+    ALuint max_length{HRIR_LENGTH};
     /* Increase the IR size by double the base delay with dual-band processing
      * to account for the head and tail from the HF response scale.
      */
-    const ALsizei irsize{mini(Hrtf->irSize + base_delay*2, max_length)};
-    max_length = mini(max_delay-min_delay + irsize, max_length);
+    const ALuint irsize{minu(Hrtf->irSize + base_delay*2, max_length)};
+    max_length = minu(max_delay-min_delay + irsize, max_length);
 
     /* Round up to the next IR size multiple. */
     max_length += MOD_IR_SIZE-1;
     max_length -= max_length%MOD_IR_SIZE;
 
-    TRACE("Skipped delay: %d, max delay: %d, new FIR length: %d\n",
-          min_delay, max_delay-min_delay, max_length);
+    TRACE("Skipped delay: %u, max delay: %u, new FIR length: %u\n", min_delay, max_delay-min_delay,
+        max_length);
     state->IrSize = max_length;
 }
 
 
 namespace {
 
-std::unique_ptr<HrtfEntry> CreateHrtfStore(ALuint rate, ALsizei irSize, const ALsizei fdCount,
+std::unique_ptr<HrtfEntry> CreateHrtfStore(ALuint rate, ALushort irSize, const ALuint fdCount,
     const ALubyte *evCount, const ALfloat *distance, const ALushort *azCount,
-    const ALushort *irOffset, ALsizei irCount, const ALfloat (*coeffs)[2],
+    const ALushort *irOffset, ALushort irCount, const ALfloat (*coeffs)[2],
     const ALubyte (*delays)[2], const char *filename)
 {
     std::unique_ptr<HrtfEntry> Hrtf;
 
-    ALsizei evTotal{std::accumulate(evCount, evCount+fdCount, 0)};
+    ALuint evTotal{std::accumulate(evCount, evCount+fdCount, 0u)};
     size_t total{sizeof(HrtfEntry)};
     total  = RoundUp(total, alignof(HrtfEntry::Field)); /* Align for field infos */
     total += sizeof(HrtfEntry::Field)*fdCount;
@@ -484,7 +476,7 @@ std::unique_ptr<HrtfEntry> CreateHrtfStore(ALuint rate, ALsizei irSize, const AL
         ERR("Out of memory allocating storage for %s.\n", filename);
     else
     {
-        InitRef(Hrtf->ref, 1u);
+        InitRef(Hrtf->mRef, 1u);
         Hrtf->sampleRate = rate;
         Hrtf->irSize = irSize;
         Hrtf->fdCount = fdCount;
@@ -511,22 +503,22 @@ std::unique_ptr<HrtfEntry> CreateHrtfStore(ALuint rate, ALsizei irSize, const AL
         assert(offset == total);
 
         /* Copy input data to storage. */
-        for(ALsizei i{0};i < fdCount;i++)
+        for(ALuint i{0};i < fdCount;i++)
         {
             field_[i].distance = distance[i];
             field_[i].evCount = evCount[i];
         }
-        for(ALsizei i{0};i < evTotal;i++)
+        for(ALuint i{0};i < evTotal;i++)
         {
             elev_[i].azCount = azCount[i];
             elev_[i].irOffset = irOffset[i];
         }
-        for(ALsizei i{0};i < irSize*irCount;i++)
+        for(ALuint i{0};i < ALuint{irSize}*irCount;i++)
         {
             coeffs_[i][0] = coeffs[i][0];
             coeffs_[i][1] = coeffs[i][1];
         }
-        for(ALsizei i{0};i < irCount;i++)
+        for(ALuint i{0};i < irCount;i++)
         {
             delays_[i][0] = delays[i][0];
             delays_[i][1] = delays[i][1];
@@ -575,7 +567,7 @@ ALuint GetLE_ALuint(std::istream &data)
     ret |= data.get() << 8;
     ret |= data.get() << 16;
     ret |= data.get() << 24;
-    return ret;
+    return static_cast<ALuint>(ret);
 }
 
 std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
@@ -606,7 +598,7 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
     if(failed)
         return nullptr;
 
-    al::vector<ALushort> evOffset(evCount);
+    auto evOffset = al::vector<ALushort>(evCount);
     for(auto &val : evOffset)
         val = GetLE_ALushort(data);
     if(!data || data.eof())
@@ -614,12 +606,11 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
         ERR("Failed reading %s\n", filename);
         return nullptr;
     }
-    for(ALsizei i{1};i < evCount;i++)
+    for(size_t i{1};i < evCount;i++)
     {
         if(evOffset[i] <= evOffset[i-1])
         {
-            ERR("Invalid evOffset: evOffset[%d]=%d (last=%d)\n",
-                i, evOffset[i], evOffset[i-1]);
+            ERR("Invalid evOffset: evOffset[%zu]=%d (last=%d)\n", i, evOffset[i], evOffset[i-1]);
             failed = AL_TRUE;
         }
     }
@@ -632,18 +623,18 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
     if(failed)
         return nullptr;
 
-    al::vector<ALushort> azCount(evCount);
-    for(ALsizei i{1};i < evCount;i++)
+    auto azCount = al::vector<ALushort>(evCount);
+    for(size_t i{1};i < evCount;i++)
     {
-        azCount[i-1] = evOffset[i] - evOffset[i-1];
+        azCount[i-1] = static_cast<ALushort>(evOffset[i] - evOffset[i-1]);
         if(azCount[i-1] < MIN_AZ_COUNT || azCount[i-1] > MAX_AZ_COUNT)
         {
-            ERR("Unsupported azimuth count: azCount[%d]=%d (%d to %d)\n",
+            ERR("Unsupported azimuth count: azCount[%zd]=%d (%d to %d)\n",
                 i-1, azCount[i-1], MIN_AZ_COUNT, MAX_AZ_COUNT);
             failed = AL_TRUE;
         }
     }
-    azCount.back() = irCount - evOffset.back();
+    azCount.back() = static_cast<ALushort>(irCount - evOffset.back());
     if(azCount.back() < MIN_AZ_COUNT || azCount.back() > MAX_AZ_COUNT)
     {
         ERR("Unsupported azimuth count: azCount[%zu]=%d (%d to %d)\n",
@@ -653,8 +644,8 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
     if(failed)
         return nullptr;
 
-    al::vector<std::array<ALfloat,2>> coeffs(irSize*irCount);
-    al::vector<std::array<ALubyte,2>> delays(irCount);
+    auto coeffs = al::vector<std::array<ALfloat,2>>(irSize*irCount);
+    auto delays = al::vector<std::array<ALubyte,2>>(irCount);
     for(auto &val : coeffs)
         val[0] = GetLE_ALshort(data) / 32768.0f;
     for(auto &val : delays)
@@ -664,11 +655,11 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
         ERR("Failed reading %s\n", filename);
         return nullptr;
     }
-    for(ALsizei i{0};i < irCount;i++)
+    for(size_t i{0};i < irCount;i++)
     {
         if(delays[i][0] > MAX_HRIR_DELAY)
         {
-            ERR("Invalid delays[%d]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
+            ERR("Invalid delays[%zd]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
             failed = AL_TRUE;
         }
     }
@@ -676,16 +667,16 @@ std::unique_ptr<HrtfEntry> LoadHrtf00(std::istream &data, const char *filename)
         return nullptr;
 
     /* Mirror the left ear responses to the right ear. */
-    for(ALsizei i{0};i < evCount;i++)
+    for(size_t i{0};i < evCount;i++)
     {
         const ALushort evoffset{evOffset[i]};
         const ALushort azcount{azCount[i]};
-        for(ALsizei j{0};j < azcount;j++)
+        for(size_t j{0};j < azcount;j++)
         {
-            const ALsizei lidx{evoffset + j};
-            const ALsizei ridx{evoffset + ((azcount-j) % azcount)};
+            const size_t lidx{evoffset + j};
+            const size_t ridx{evoffset + ((azcount-j) % azcount)};
 
-            for(ALsizei k{0};k < irSize;k++)
+            for(size_t k{0};k < irSize;k++)
                 coeffs[ridx*irSize + k][1] = coeffs[lidx*irSize + k][0];
             delays[ridx][1] = delays[lidx][0];
         }
@@ -724,36 +715,36 @@ std::unique_ptr<HrtfEntry> LoadHrtf01(std::istream &data, const char *filename)
     if(failed)
         return nullptr;
 
-    al::vector<ALushort> azCount(evCount);
+    auto azCount = al::vector<ALushort>(evCount);
     std::generate(azCount.begin(), azCount.end(), std::bind(GetLE_ALubyte, std::ref(data)));
     if(!data || data.eof())
     {
         ERR("Failed reading %s\n", filename);
         return nullptr;
     }
-    for(ALsizei i{0};i < evCount;++i)
+    for(size_t i{0};i < evCount;++i)
     {
         if(azCount[i] < MIN_AZ_COUNT || azCount[i] > MAX_AZ_COUNT)
         {
-            ERR("Unsupported azimuth count: azCount[%d]=%d (%d to %d)\n",
-                i, azCount[i], MIN_AZ_COUNT, MAX_AZ_COUNT);
+            ERR("Unsupported azimuth count: azCount[%zd]=%d (%d to %d)\n", i, azCount[i],
+                MIN_AZ_COUNT, MAX_AZ_COUNT);
             failed = AL_TRUE;
         }
     }
     if(failed)
         return nullptr;
 
-    al::vector<ALushort> evOffset(evCount);
+    auto evOffset = al::vector<ALushort>(evCount);
     evOffset[0] = 0;
     ALushort irCount{azCount[0]};
-    for(ALsizei i{1};i < evCount;i++)
+    for(size_t i{1};i < evCount;i++)
     {
-        evOffset[i] = evOffset[i-1] + azCount[i-1];
-        irCount += azCount[i];
+        evOffset[i] = static_cast<ALushort>(evOffset[i-1] + azCount[i-1]);
+        irCount = static_cast<ALushort>(irCount + azCount[i]);
     }
 
-    al::vector<std::array<ALfloat,2>> coeffs(irSize*irCount);
-    al::vector<std::array<ALubyte,2>> delays(irCount);
+    auto coeffs = al::vector<std::array<ALfloat,2>>(irSize*irCount);
+    auto delays = al::vector<std::array<ALubyte,2>>(irCount);
     for(auto &val : coeffs)
         val[0] = GetLE_ALshort(data) / 32768.0f;
     for(auto &val : delays)
@@ -763,11 +754,11 @@ std::unique_ptr<HrtfEntry> LoadHrtf01(std::istream &data, const char *filename)
         ERR("Failed reading %s\n", filename);
         return nullptr;
     }
-    for(ALsizei i{0};i < irCount;i++)
+    for(size_t i{0};i < irCount;i++)
     {
         if(delays[i][0] > MAX_HRIR_DELAY)
         {
-            ERR("Invalid delays[%d]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
+            ERR("Invalid delays[%zd]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
             failed = AL_TRUE;
         }
     }
@@ -775,16 +766,16 @@ std::unique_ptr<HrtfEntry> LoadHrtf01(std::istream &data, const char *filename)
         return nullptr;
 
     /* Mirror the left ear responses to the right ear. */
-    for(ALsizei i{0};i < evCount;i++)
+    for(size_t i{0};i < evCount;i++)
     {
         const ALushort evoffset{evOffset[i]};
         const ALushort azcount{azCount[i]};
-        for(ALsizei j{0};j < azcount;j++)
+        for(size_t j{0};j < azcount;j++)
         {
-            const ALsizei lidx{evoffset + j};
-            const ALsizei ridx{evoffset + ((azcount-j) % azcount)};
+            const size_t lidx{evoffset + j};
+            const size_t ridx{evoffset + ((azcount-j) % azcount)};
 
-            for(ALsizei k{0};k < irSize;k++)
+            for(size_t k{0};k < irSize;k++)
                 coeffs[ridx*irSize + k][1] = coeffs[lidx*irSize + k][0];
             delays[ridx][1] = delays[lidx][0];
         }
@@ -842,10 +833,10 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
     if(failed)
         return nullptr;
 
-    al::vector<ALfloat> distance(fdCount);
-    al::vector<ALubyte> evCount(fdCount);
-    al::vector<ALushort> azCount;
-    for(ALsizei f{0};f < fdCount;f++)
+    auto distance = al::vector<ALfloat>(fdCount);
+    auto evCount = al::vector<ALubyte>(fdCount);
+    auto azCount = al::vector<ALushort>{};
+    for(size_t f{0};f < fdCount;f++)
     {
         distance[f] = GetLE_ALushort(data) / 1000.0f;
         evCount[f] = GetLE_ALubyte(data);
@@ -857,28 +848,28 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
 
         if(distance[f] < MIN_FD_DISTANCE || distance[f] > MAX_FD_DISTANCE)
         {
-            ERR("Unsupported field distance[%d]=%f (%f to %f meters)\n", f,
-                distance[f], MIN_FD_DISTANCE, MAX_FD_DISTANCE);
+            ERR("Unsupported field distance[%zu]=%f (%f to %f meters)\n", f, distance[f],
+                MIN_FD_DISTANCE, MAX_FD_DISTANCE);
             failed = AL_TRUE;
         }
         if(f > 0 && distance[f] <= distance[f-1])
         {
-            ERR("Field distance[%d] is not after previous (%f > %f)\n", f, distance[f],
+            ERR("Field distance[%zu] is not after previous (%f > %f)\n", f, distance[f],
                 distance[f-1]);
             failed = AL_TRUE;
         }
         if(evCount[f] < MIN_EV_COUNT || evCount[f] > MAX_EV_COUNT)
         {
-            ERR("Unsupported elevation count: evCount[%d]=%d (%d to %d)\n", f,
-                evCount[f], MIN_EV_COUNT, MAX_EV_COUNT);
+            ERR("Unsupported elevation count: evCount[%zu]=%d (%d to %d)\n", f, evCount[f],
+                MIN_EV_COUNT, MAX_EV_COUNT);
             failed = AL_TRUE;
         }
         if(failed)
             return nullptr;
 
-        size_t ebase{azCount.size()};
+        const size_t ebase{azCount.size()};
         azCount.resize(ebase + evCount[f]);
-        std::generate(azCount.begin()+ebase, azCount.end(),
+        std::generate(azCount.begin()+static_cast<ptrdiff_t>(ebase), azCount.end(),
             std::bind(GetLE_ALubyte, std::ref(data)));
         if(!data || data.eof())
         {
@@ -886,11 +877,11 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
             return nullptr;
         }
 
-        for(ALsizei e{0};e < evCount[f];e++)
+        for(size_t e{0};e < evCount[f];e++)
         {
             if(azCount[ebase+e] < MIN_AZ_COUNT || azCount[ebase+e] > MAX_AZ_COUNT)
             {
-                ERR("Unsupported azimuth count: azCount[%d][%d]=%d (%d to %d)\n", f, e,
+                ERR("Unsupported azimuth count: azCount[%zu][%zu]=%d (%d to %d)\n", f, e,
                     azCount[ebase+e], MIN_AZ_COUNT, MAX_AZ_COUNT);
                 failed = AL_TRUE;
             }
@@ -899,13 +890,13 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
             return nullptr;
     }
 
-    al::vector<ALushort> evOffset(azCount.size());
+    auto evOffset = al::vector<ALushort>(azCount.size());
     evOffset[0] = 0;
     std::partial_sum(azCount.cbegin(), azCount.cend()-1, evOffset.begin()+1);
-    const ALsizei irTotal{evOffset.back() + azCount.back()};
+    const auto irTotal = static_cast<ALushort>(evOffset.back() + azCount.back());
 
-    al::vector<std::array<ALfloat,2>> coeffs(irSize*irTotal);
-    al::vector<std::array<ALubyte,2>> delays(irTotal);
+    auto coeffs = al::vector<std::array<ALfloat,2>>(irSize*irTotal);
+    auto delays = al::vector<std::array<ALubyte,2>>(irTotal);
     if(channelType == CHANTYPE_LEFTONLY)
     {
         if(sampleType == SAMPLETYPE_S16)
@@ -916,7 +907,7 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
         else if(sampleType == SAMPLETYPE_S24)
         {
             for(auto &val : coeffs)
-                val[0] = GetLE_ALint24(data) / 8388608.0f;
+                val[0] = static_cast<float>(GetLE_ALint24(data)) / 8388608.0f;
         }
         for(auto &val : delays)
             val[0] = GetLE_ALubyte(data);
@@ -925,11 +916,11 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
             ERR("Failed reading %s\n", filename);
             return nullptr;
         }
-        for(ALsizei i{0};i < irTotal;++i)
+        for(size_t i{0};i < irTotal;++i)
         {
             if(delays[i][0] > MAX_HRIR_DELAY)
             {
-                ERR("Invalid delays[%d][0]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
+                ERR("Invalid delays[%zu][0]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
                 failed = AL_TRUE;
             }
         }
@@ -948,8 +939,8 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
         {
             for(auto &val : coeffs)
             {
-                val[0] = GetLE_ALint24(data) / 8388608.0f;
-                val[1] = GetLE_ALint24(data) / 8388608.0f;
+                val[0] = static_cast<float>(GetLE_ALint24(data)) / 8388608.0f;
+                val[1] = static_cast<float>(GetLE_ALint24(data)) / 8388608.0f;
             }
         }
         for(auto &val : delays)
@@ -963,16 +954,16 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
             return nullptr;
         }
 
-        for(ALsizei i{0};i < irTotal;++i)
+        for(size_t i{0};i < irTotal;++i)
         {
             if(delays[i][0] > MAX_HRIR_DELAY)
             {
-                ERR("Invalid delays[%d][0]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
+                ERR("Invalid delays[%zu][0]: %d (%d)\n", i, delays[i][0], MAX_HRIR_DELAY);
                 failed = AL_TRUE;
             }
             if(delays[i][1] > MAX_HRIR_DELAY)
             {
-                ERR("Invalid delays[%d][1]: %d (%d)\n", i, delays[i][1], MAX_HRIR_DELAY);
+                ERR("Invalid delays[%zu][1]: %d (%d)\n", i, delays[i][1], MAX_HRIR_DELAY);
                 failed = AL_TRUE;
             }
         }
@@ -983,19 +974,19 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
     if(channelType == CHANTYPE_LEFTONLY)
     {
         /* Mirror the left ear responses to the right ear. */
-        ALsizei ebase{0};
-        for(ALsizei f{0};f < fdCount;f++)
+        size_t ebase{0};
+        for(size_t f{0};f < fdCount;f++)
         {
-            for(ALsizei e{0};e < evCount[f];e++)
+            for(size_t e{0};e < evCount[f];e++)
             {
                 const ALushort evoffset{evOffset[ebase+e]};
                 const ALushort azcount{azCount[ebase+e]};
-                for(ALsizei a{0};a < azcount;a++)
+                for(size_t a{0};a < azcount;a++)
                 {
-                    const ALsizei lidx{evoffset + a};
-                    const ALsizei ridx{evoffset + ((azcount-a) % azcount)};
+                    const size_t lidx{evoffset + a};
+                    const size_t ridx{evoffset + ((azcount-a) % azcount)};
 
-                    for(ALsizei k{0};k < irSize;k++)
+                    for(size_t k{0};k < irSize;k++)
                         coeffs[ridx*irSize + k][1] = coeffs[lidx*irSize + k][0];
                     delays[ridx][1] = delays[lidx][0];
                 }
@@ -1022,13 +1013,13 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
          * of per-group azimuth counts.
          */
         auto azcnt_end = azCount_.end();
-        auto copy_azs = [&azCount,&azcnt_end](const size_t ebase, const ALubyte num_evs) -> size_t
+        auto copy_azs = [&azCount,&azcnt_end](const ptrdiff_t ebase, const ALubyte num_evs) -> ptrdiff_t
         {
             auto azcnt_src = azCount.begin()+ebase;
             azcnt_end = std::copy_backward(azcnt_src, azcnt_src+num_evs, azcnt_end);
             return ebase + num_evs;
         };
-        std::accumulate(evCount.cbegin(), evCount.cend(), size_t{0u}, copy_azs);
+        std::accumulate(evCount.cbegin(), evCount.cend(), ptrdiff_t{0}, copy_azs);
         assert(azCount_.begin() == azcnt_end);
 
         /* Reestablish the IR offset for each elevation index, given the new
@@ -1040,7 +1031,7 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
         /* Reverse the order of each field's group of IRs. */
         auto coeffs_end = coeffs_.end();
         auto delays_end = delays_.end();
-        auto copy_irs = [irSize,&azCount,&coeffs,&delays,&coeffs_end,&delays_end](const size_t ebase, const ALubyte num_evs) -> size_t
+        auto copy_irs = [irSize,&azCount,&coeffs,&delays,&coeffs_end,&delays_end](const ptrdiff_t ebase, const ALubyte num_evs) -> ptrdiff_t
         {
             const ALsizei abase{std::accumulate(azCount.cbegin(), azCount.cbegin()+ebase, 0)};
             const ALsizei num_azs{std::accumulate(azCount.cbegin()+ebase,
@@ -1053,7 +1044,7 @@ std::unique_ptr<HrtfEntry> LoadHrtf02(std::istream &data, const char *filename)
 
             return ebase + num_evs;
         };
-        std::accumulate(evCount.cbegin(), evCount.cend(), size_t{0u}, copy_irs);
+        std::accumulate(evCount.cbegin(), evCount.cend(), ptrdiff_t{0}, copy_irs);
         assert(coeffs_.begin() == coeffs_end);
         assert(delays_.begin() == delays_end);
 
@@ -1304,9 +1295,9 @@ HrtfEntry *GetLoadedHrtf(HrtfHandle *handle)
 
     std::unique_ptr<std::istream> stream;
     const char *name{""};
-    ALuint residx{};
+    ALint residx{};
     char ch{};
-    if(sscanf(handle->filename.data(), "!%u%c", &residx, &ch) == 2 && ch == '_')
+    if(sscanf(handle->filename.data(), "!%d%c", &residx, &ch) == 2 && ch == '_')
     {
         name = strchr(handle->filename.data(), ch)+1;
 
@@ -1372,14 +1363,14 @@ HrtfEntry *GetLoadedHrtf(HrtfHandle *handle)
 
 void HrtfEntry::IncRef()
 {
-    auto ref = IncrementRef(this->ref);
-    TRACEREF("HrtfEntry %p increasing refcount to %u\n", this, ref);
+    auto ref = IncrementRef(mRef);
+    TRACE("HrtfEntry %p increasing refcount to %u\n", decltype(std::declval<void*>()){this}, ref);
 }
 
 void HrtfEntry::DecRef()
 {
-    auto ref = DecrementRef(this->ref);
-    TRACEREF("HrtfEntry %p decreasing refcount to %u\n", this, ref);
+    auto ref = DecrementRef(mRef);
+    TRACE("HrtfEntry %p decreasing refcount to %u\n", decltype(std::declval<void*>()){this}, ref);
     if(ref == 0)
     {
         std::lock_guard<std::mutex> _{LoadedHrtfLock};
@@ -1388,7 +1379,7 @@ void HrtfEntry::DecRef()
         auto delete_unused = [](HrtfHandlePtr &handle) -> void
         {
             HrtfEntry *entry{handle->entry.get()};
-            if(entry && ReadRef(entry->ref) == 0)
+            if(entry && ReadRef(entry->mRef) == 0)
             {
                 TRACE("Unloading unused HRTF %s\n", handle->filename.data());
                 handle->entry = nullptr;

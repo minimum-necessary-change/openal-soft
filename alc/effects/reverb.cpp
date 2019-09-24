@@ -192,7 +192,6 @@ constexpr std::array<ALfloat,NUM_LINES> EARLY_LINE_LENGTHS{{
 constexpr std::array<ALfloat,NUM_LINES> LATE_ALLPASS_LENGTHS{{
     1.6182800e-4f, 2.0389060e-4f, 2.8159360e-4f, 3.2365600e-4f
 }};
-constexpr auto LATE_ALLPASS_LENGTHS_size = LATE_ALLPASS_LENGTHS.size();
 
 /* The late lines are used to approximate the decaying cycle of recursive
  * late reflections.
@@ -212,7 +211,6 @@ constexpr auto LATE_ALLPASS_LENGTHS_size = LATE_ALLPASS_LENGTHS.size();
 constexpr std::array<ALfloat,NUM_LINES> LATE_LINE_LENGTHS{{
     1.9419362e-3f, 2.4466860e-3f, 3.3791220e-3f, 3.8838720e-3f
 }};
-constexpr auto LATE_LINE_LENGTHS_size = LATE_LINE_LENGTHS.size();
 
 
 using ReverbUpdateLine = std::array<float,MAX_UPDATE_SAMPLES>;
@@ -222,27 +220,30 @@ struct DelayLineI {
      * of 2 to allow the use of bit-masking instead of a modulus for wrapping.
      */
     size_t Mask{0u};
-    std::array<float,NUM_LINES> *Line{nullptr};
+    union {
+        uintptr_t LineOffset{0u};
+        std::array<float,NUM_LINES> *Line;
+    };
 
     /* Given the allocated sample buffer, this function updates each delay line
      * offset.
      */
     void realizeLineOffset(std::array<float,NUM_LINES> *sampleBuffer) noexcept
-    { Line = &sampleBuffer[reinterpret_cast<ptrdiff_t>(Line)]; }
+    { Line = sampleBuffer + LineOffset; }
 
     /* Calculate the length of a delay line and store its mask and offset. */
-    ALuint calcLineLength(const ALfloat length, const ptrdiff_t offset, const ALfloat frequency,
+    ALuint calcLineLength(const ALfloat length, const uintptr_t offset, const ALfloat frequency,
         const ALuint extra)
     {
         /* All line lengths are powers of 2, calculated from their lengths in
          * seconds, rounded up.
          */
-        auto samples = static_cast<ALuint>(float2int(std::ceil(length*frequency)));
+        ALuint samples{float2uint(std::ceil(length*frequency))};
         samples = NextPowerOf2(samples + extra);
 
         /* All lines share a single sample buffer. */
         Mask = samples - 1;
-        Line = reinterpret_cast<std::array<float,NUM_LINES>*>(offset);
+        LineOffset = offset;
 
         /* Return the sample count for accumulation. */
         return samples;
@@ -518,7 +519,7 @@ bool ReverbState::allocLines(const ALfloat frequency)
      */
     ALfloat length{AL_EAXREVERB_MAX_REFLECTIONS_DELAY + EARLY_TAP_LENGTHS.back()*multiplier +
         AL_EAXREVERB_MAX_LATE_REVERB_DELAY +
-        (LATE_LINE_LENGTHS.back() - LATE_LINE_LENGTHS.front())/float{LATE_LINE_LENGTHS_size}*multiplier};
+        (LATE_LINE_LENGTHS.back() - LATE_LINE_LENGTHS.front())/float{NUM_LINES}*multiplier};
     totalSamples += mDelay.calcLineLength(length, totalSamples, frequency, BUFFERSIZE);
 
     /* The early vector all-pass line. */
@@ -569,7 +570,7 @@ ALboolean ReverbState::deviceUpdate(const ALCdevice *device)
     const ALfloat multiplier{CalcDelayLengthMult(AL_EAXREVERB_MAX_DENSITY)};
 
     /* The late feed taps are set a fixed position past the latest delay tap. */
-    mLateFeedTap = float2int(
+    mLateFeedTap = float2uint(
         (AL_EAXREVERB_MAX_REFLECTIONS_DELAY + EARLY_TAP_LENGTHS.back()*multiplier) * frequency);
 
     /* Clear filters and gain coefficients since the delay lines were all just
@@ -731,13 +732,13 @@ void EarlyReflections::updateLines(const ALfloat density, const ALfloat diffusio
         ALfloat length{EARLY_ALLPASS_LENGTHS[i] * multiplier};
 
         /* Calculate the delay offset for each all-pass line. */
-        VecAp.Offset[i][1] = float2int(length * frequency);
+        VecAp.Offset[i][1] = float2uint(length * frequency);
 
         /* Calculate the length (in seconds) of each delay line. */
         length = EARLY_LINE_LENGTHS[i] * multiplier;
 
         /* Calculate the delay offset for each delay line. */
-        Offset[i][1] = float2int(length * frequency);
+        Offset[i][1] = float2uint(length * frequency);
 
         /* Calculate the gain (coefficient) for each line. */
         Coeff[i][1] = CalcDecayCoeff(length, decayTime);
@@ -756,7 +757,7 @@ void LateReverb::updateLines(const ALfloat density, const ALfloat diffusion,
 
     const ALfloat late_allpass_avg{
         std::accumulate(LATE_ALLPASS_LENGTHS.begin(), LATE_ALLPASS_LENGTHS.end(), 0.0f) /
-        float{LATE_ALLPASS_LENGTHS_size}};
+        float{NUM_LINES}};
 
     /* To compensate for changes in modal density and decay time of the late
      * reverb signal, the input is attenuated based on the maximal energy of
@@ -768,7 +769,7 @@ void LateReverb::updateLines(const ALfloat density, const ALfloat diffusion,
      */
     const ALfloat multiplier{CalcDelayLengthMult(density)};
     ALfloat length{std::accumulate(LATE_LINE_LENGTHS.begin(), LATE_LINE_LENGTHS.end(), 0.0f) /
-        float{LATE_LINE_LENGTHS_size} * multiplier};
+        float{NUM_LINES} * multiplier};
     length += late_allpass_avg * multiplier;
     /* The density gain calculation uses an average decay time weighted by
      * approximate bandwidth. This attempts to compensate for losses of energy
@@ -789,13 +790,13 @@ void LateReverb::updateLines(const ALfloat density, const ALfloat diffusion,
         length = LATE_ALLPASS_LENGTHS[i] * multiplier;
 
         /* Calculate the delay offset for each all-pass line. */
-        VecAp.Offset[i][1] = float2int(length * frequency);
+        VecAp.Offset[i][1] = float2uint(length * frequency);
 
         /* Calculate the length (in seconds) of each delay line. */
         length = LATE_LINE_LENGTHS[i] * multiplier;
 
         /* Calculate the delay offset for each delay line. */
-        Offset[i][1] = float2int(length*frequency + 0.5f);
+        Offset[i][1] = float2uint(length*frequency + 0.5f);
 
         /* Approximate the absorption that the vector all-pass would exhibit
          * given the current diffusion so we don't have to process a full T60
@@ -828,14 +829,14 @@ void ReverbState::updateDelayLine(const ALfloat earlyDelay, const ALfloat lateDe
     for(size_t i{0u};i < NUM_LINES;i++)
     {
         ALfloat length{earlyDelay + EARLY_TAP_LENGTHS[i]*multiplier};
-        mEarlyDelayTap[i][1] = float2int(length * frequency);
+        mEarlyDelayTap[i][1] = float2uint(length * frequency);
 
         length = EARLY_TAP_LENGTHS[i]*multiplier;
         mEarlyDelayCoeff[i][1] = CalcDecayCoeff(length, decayTime);
 
-        length = lateDelay + (LATE_LINE_LENGTHS[i] - LATE_LINE_LENGTHS.front()) /
-            float{LATE_LINE_LENGTHS_size} * multiplier;
-        mLateDelayTap[i][1] = mLateFeedTap + float2int(length * frequency);
+        length = (LATE_LINE_LENGTHS[i] - LATE_LINE_LENGTHS.front())/float{NUM_LINES}*multiplier +
+            lateDelay;
+        mLateDelayTap[i][1] = mLateFeedTap + float2uint(length * frequency);
     }
 }
 
@@ -846,6 +847,8 @@ void ReverbState::updateDelayLine(const ALfloat earlyDelay, const ALfloat lateDe
  */
 alu::Matrix GetTransformFromVector(const ALfloat *vec)
 {
+    constexpr float sqrt_3{1.73205080756887719318f};
+
     /* Normalize the panning vector according to the N3D scale, which has an
      * extra sqrt(3) term on the directional components. Converting from OpenAL
      * to B-Format also requires negating X (ACN 1) and Z (ACN 3). Note however
@@ -857,9 +860,9 @@ alu::Matrix GetTransformFromVector(const ALfloat *vec)
     ALfloat mag{std::sqrt(vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2])};
     if(mag > 1.0f)
     {
-        norm[0] = vec[0] / mag * -al::MathDefs<float>::Sqrt3();
-        norm[1] = vec[1] / mag * al::MathDefs<float>::Sqrt3();
-        norm[2] = vec[2] / mag * al::MathDefs<float>::Sqrt3();
+        norm[0] = vec[0] / mag * -sqrt_3;
+        norm[1] = vec[1] / mag * sqrt_3;
+        norm[2] = vec[2] / mag * sqrt_3;
         mag = 1.0f;
     }
     else
@@ -868,9 +871,9 @@ alu::Matrix GetTransformFromVector(const ALfloat *vec)
          * term. There's no need to renormalize the magnitude since it would
          * just be reapplied in the matrix.
          */
-        norm[0] = vec[0] * -al::MathDefs<float>::Sqrt3();
-        norm[1] = vec[1] * al::MathDefs<float>::Sqrt3();
-        norm[2] = vec[2] * al::MathDefs<float>::Sqrt3();
+        norm[0] = vec[0] * -sqrt_3;
+        norm[1] = vec[1] * sqrt_3;
+        norm[2] = vec[2] * sqrt_3;
     }
 
     return alu::Matrix{
@@ -1466,7 +1469,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
             /* Some mixers require maintaining a 4-sample alignment, so ensure
              * that if it's not the last iteration.
              */
-            if(base+todo < samplesToDo) todo &= ~3;
+            if(base+todo < samplesToDo) todo &= ~size_t{3};
             ASSUME(todo > 0);
 
             /* Generate non-faded early reflections and late reverb. */
@@ -1486,7 +1489,7 @@ void ReverbState::process(const size_t samplesToDo, const al::span<const FloatBu
         for(size_t base{0};base < samplesToDo;)
         {
             size_t todo{minz(samplesToDo - base, minz(mMaxUpdate[0], mMaxUpdate[1]))};
-            if(base+todo < samplesToDo) todo &= ~3;
+            if(base+todo < samplesToDo) todo &= ~size_t{3};
             ASSUME(todo > 0);
 
             /* Generate cross-faded early reflections and late reverb. */
@@ -1528,7 +1531,7 @@ void EAXReverb_setParami(EffectProps *props, ALCcontext *context, ALenum param, 
         case AL_EAXREVERB_DECAY_HFLIMIT:
             if(!(val >= AL_EAXREVERB_MIN_DECAY_HFLIMIT && val <= AL_EAXREVERB_MAX_DECAY_HFLIMIT))
                 SETERR_RETURN(context, AL_INVALID_VALUE,, "EAX Reverb decay hflimit out of range");
-            props->Reverb.DecayHFLimit = val;
+            props->Reverb.DecayHFLimit = val != AL_FALSE;
             break;
 
         default:
@@ -1865,7 +1868,7 @@ void StdReverb_setParami(EffectProps *props, ALCcontext *context, ALenum param, 
         case AL_REVERB_DECAY_HFLIMIT:
             if(!(val >= AL_REVERB_MIN_DECAY_HFLIMIT && val <= AL_REVERB_MAX_DECAY_HFLIMIT))
                 SETERR_RETURN(context, AL_INVALID_VALUE,, "Reverb decay hflimit out of range");
-            props->Reverb.DecayHFLimit = val;
+            props->Reverb.DecayHFLimit = val != AL_FALSE;
             break;
 
         default:

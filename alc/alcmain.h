@@ -142,7 +142,7 @@ public:
 
 struct BFChannelConfig {
     ALfloat Scale;
-    ALsizei Index;
+    ALuint Index;
 };
 
 /* Size for temporary storage of buffer data, in ALfloats. Larger values need
@@ -183,7 +183,7 @@ struct MixParams {
 };
 
 struct RealMixParams {
-    std::array<ALint,MaxChannels> ChannelIndex{};
+    std::array<ALuint,MaxChannels> ChannelIndex{};
 
     al::span<FloatBufferLine> Buffer;
 };
@@ -213,9 +213,9 @@ struct ALCdevice : public al::intrusive_ref<ALCdevice> {
     ALuint BufferSize{};
 
     DevFmtChannels FmtChans{};
-    DevFmtType     FmtType{};
+    DevFmtType FmtType{};
     ALboolean IsHeadphones{AL_FALSE};
-    ALsizei mAmbiOrder{0};
+    ALuint mAmbiOrder{0};
     /* For DevFmtAmbi* output only, specifies the channel order and
      * normalization.
      */
@@ -242,7 +242,7 @@ struct ALCdevice : public al::intrusive_ref<ALCdevice> {
 
     ALCuint NumMonoSources{};
     ALCuint NumStereoSources{};
-    ALsizei NumAuxSends{};
+    ALCuint NumAuxSends{};
 
     // Map of Buffers for this device
     std::mutex BufferLock;
@@ -340,9 +340,9 @@ struct ALCdevice : public al::intrusive_ref<ALCdevice> {
     ALCdevice& operator=(const ALCdevice&) = delete;
     ~ALCdevice();
 
-    ALsizei bytesFromFmt() const noexcept { return BytesFromDevFmt(FmtType); }
-    ALsizei channelsFromFmt() const noexcept { return ChannelsFromDevFmt(FmtChans, mAmbiOrder); }
-    ALsizei frameSizeFromFmt() const noexcept { return bytesFromFmt() * channelsFromFmt(); }
+    ALuint bytesFromFmt() const noexcept { return BytesFromDevFmt(FmtType); }
+    ALuint channelsFromFmt() const noexcept { return ChannelsFromDevFmt(FmtChans, mAmbiOrder); }
+    ALuint frameSizeFromFmt() const noexcept { return bytesFromFmt() * channelsFromFmt(); }
 
     void ProcessHrtf(const size_t SamplesToDo);
     void ProcessAmbiDec(const size_t SamplesToDo);
@@ -374,11 +374,12 @@ const ALCchar *DevFmtChannelsString(DevFmtChannels chans) noexcept;
 /**
  * GetChannelIdxByName
  *
- * Returns the index for the given channel name (e.g. FrontCenter), or -1 if it
- * doesn't exist.
+ * Returns the index for the given channel name (e.g. FrontCenter), or
+ * INVALID_CHANNEL_INDEX if it doesn't exist.
  */
-inline ALint GetChannelIdxByName(const RealMixParams &real, Channel chan) noexcept
+inline ALuint GetChannelIdxByName(const RealMixParams &real, Channel chan) noexcept
 { return real.ChannelIndex[chan]; }
+#define INVALID_CHANNEL_INDEX ~0u
 
 
 al::vector<std::string> SearchDataFiles(const char *match, const char *subdir);

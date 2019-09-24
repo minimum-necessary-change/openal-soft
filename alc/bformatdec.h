@@ -43,18 +43,18 @@ class BFormatDec {
 
 public:
     BFormatDec(const AmbDecConf *conf, const bool allow_2band, const ALuint inchans,
-        const ALuint srate, const ALsizei (&chanmap)[MAX_OUTPUT_CHANNELS]);
+        const ALuint srate, const ALuint (&chanmap)[MAX_OUTPUT_CHANNELS]);
     BFormatDec(const ALuint inchans, const ALsizei chancount,
         const ChannelDec (&chancoeffs)[MAX_OUTPUT_CHANNELS],
-        const ALsizei (&chanmap)[MAX_OUTPUT_CHANNELS]);
+        const ALuint (&chanmap)[MAX_OUTPUT_CHANNELS]);
 
     /* Decodes the ambisonic input to the given output channels. */
     void process(const al::span<FloatBufferLine> OutBuffer, const FloatBufferLine *InSamples,
         const size_t SamplesToDo);
 
     /* Retrieves per-order HF scaling factors for "upsampling" ambisonic data. */
-    static std::array<ALfloat,MAX_AMBI_ORDER+1> GetHFOrderScales(const ALsizei in_order,
-        const ALsizei out_order) noexcept;
+    static std::array<ALfloat,MAX_AMBI_ORDER+1> GetHFOrderScales(const ALuint in_order,
+        const ALuint out_order) noexcept;
 
     DEF_NEWDEL(BFormatDec)
 };

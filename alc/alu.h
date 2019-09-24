@@ -42,14 +42,14 @@ enum SpatializeMode {
     SpatializeAuto = AL_AUTO_SOFT
 };
 
-enum Resampler {
-    PointResampler,
-    LinearResampler,
-    FIR4Resampler,
-    BSinc12Resampler,
-    BSinc24Resampler,
+enum class Resampler {
+    Point,
+    Linear,
+    Cubic,
+    BSinc12,
+    BSinc24,
 
-    ResamplerMax = BSinc24Resampler
+    Max = BSinc24
 };
 extern Resampler ResamplerDefault;
 
@@ -67,8 +67,8 @@ extern Resampler ResamplerDefault;
  */
 struct BsincState {
     ALfloat sf; /* Scale interpolation factor. */
-    ALsizei m;  /* Coefficient count. */
-    ALsizei l;  /* Left coefficient offset. */
+    ALuint m;   /* Coefficient count. */
+    ALuint l;   /* Left coefficient offset. */
     /* Filter coefficients, followed by the scale, phase, and scale-phase
      * delta coefficients. Starting at phase index 0, each subsequent phase
      * index follows contiguously.
@@ -81,7 +81,7 @@ union InterpState {
 };
 
 using ResamplerFunc = const ALfloat*(*)(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst);
+    ALuint frac, ALuint increment, const al::span<float> dst);
 
 void BsincPrepare(const ALuint increment, BsincState *state, const BSincTable *table);
 
@@ -219,7 +219,7 @@ struct ALvoice {
      */
     std::atomic<ALuint> mPosition;
     /** Fractional (fixed-point) offset to the next sample. */
-    std::atomic<ALsizei> mPositionFrac;
+    std::atomic<ALuint> mPositionFrac;
 
     /* Current buffer queue item being played. */
     std::atomic<ALbufferlistitem*> mCurrentBuffer;
@@ -232,11 +232,11 @@ struct ALvoice {
     /* Properties for the attached buffer(s). */
     FmtChannels mFmtChannels;
     ALuint mFrequency;
-    ALsizei mNumChannels;
-    ALsizei mSampleSize;
+    ALuint mNumChannels;
+    ALuint mSampleSize;
 
     /** Current target parameters used for mixing. */
-    ALint mStep;
+    ALuint mStep;
 
     ResamplerFunc mResampler;
 
@@ -269,6 +269,7 @@ struct ALvoice {
 
     ALvoice() = default;
     ALvoice(const ALvoice&) = delete;
+    ALvoice(ALvoice&& rhs) noexcept { *this = std::move(rhs); }
     ~ALvoice() { delete mUpdate.exchange(nullptr, std::memory_order_acq_rel); }
     ALvoice& operator=(const ALvoice&) = delete;
     ALvoice& operator=(ALvoice&& rhs) noexcept
@@ -310,6 +311,8 @@ struct ALvoice {
 
         return *this;
     }
+
+    void mix(ALvoice::State vstate, ALCcontext *Context, const ALuint SamplesToDo);
 };
 
 
@@ -319,10 +322,10 @@ using MixerFunc = void(*)(const al::span<const float> InSamples,
 using RowMixerFunc = void(*)(const al::span<float> OutBuffer, const al::span<const float> Gains,
     const float *InSamples, const size_t InStride);
 using HrtfMixerFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     MixHrtfFilter *hrtfparams, const size_t BufferSize);
 using HrtfMixerBlendFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     const HrtfFilter *oldparams, MixHrtfFilter *newparams, const size_t BufferSize);
 using HrtfDirectMixerFunc = void(*)(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
     const al::span<const FloatBufferLine> InSamples, float2 *AccumSamples, DirectHrtfState *State,
@@ -443,8 +446,6 @@ inline std::array<ALfloat,MAX_AMBI_CHANNELS> GetAmbiIdentityRow(size_t i) noexce
     return ret;
 }
 
-
-void MixVoice(ALvoice *voice, ALvoice::State vstate, const ALuint SourceID, ALCcontext *Context, const ALuint SamplesToDo);
 
 void aluMixData(ALCdevice *device, ALvoid *OutBuffer, const ALuint NumSamples);
 /* Caller must lock the device state, and the mixer must not be running. */

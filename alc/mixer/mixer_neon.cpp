@@ -16,36 +16,33 @@
 
 template<>
 const ALfloat *Resample_<LerpTag,NEONTag>(const InterpState*, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 {
-    const int32x4_t increment4 = vdupq_n_s32(increment*4);
+    const int32x4_t increment4 = vdupq_n_s32(static_cast<int>(increment*4));
     const float32x4_t fracOne4 = vdupq_n_f32(1.0f/FRACTIONONE);
     const int32x4_t fracMask4 = vdupq_n_s32(FRACTIONMASK);
-    alignas(16) ALsizei pos_[4], frac_[4];
+    alignas(16) ALuint pos_[4], frac_[4];
     int32x4_t pos4, frac4;
 
-    ASSUME(frac >= 0);
-    ASSUME(increment > 0);
-
-    InitiatePositionArrays(frac, increment, frac_, pos_, 4);
-    frac4 = vld1q_s32(frac_);
-    pos4 = vld1q_s32(pos_);
+    InitPosArrays(frac, increment, frac_, pos_, 4);
+    frac4 = vld1q_s32(reinterpret_cast<int*>(frac_));
+    pos4 = vld1q_s32(reinterpret_cast<int*>(pos_));
 
     auto dst_iter = dst.begin();
-    const auto aligned_end = (dst.size()&~3) + dst_iter;
+    const auto aligned_end = (dst.size()&~3u) + dst_iter;
     while(dst_iter != aligned_end)
     {
-        const int pos0 = vgetq_lane_s32(pos4, 0);
-        const int pos1 = vgetq_lane_s32(pos4, 1);
-        const int pos2 = vgetq_lane_s32(pos4, 2);
-        const int pos3 = vgetq_lane_s32(pos4, 3);
-        const float32x4_t val1 = (float32x4_t){src[pos0], src[pos1], src[pos2], src[pos3]};
-        const float32x4_t val2 = (float32x4_t){src[pos0+1], src[pos1+1], src[pos2+1], src[pos3+1]};
+        const int pos0{vgetq_lane_s32(pos4, 0)};
+        const int pos1{vgetq_lane_s32(pos4, 1)};
+        const int pos2{vgetq_lane_s32(pos4, 2)};
+        const int pos3{vgetq_lane_s32(pos4, 3)};
+        const float32x4_t val1{src[pos0], src[pos1], src[pos2], src[pos3]};
+        const float32x4_t val2{src[pos0+1], src[pos1+1], src[pos2+1], src[pos3+1]};
 
         /* val1 + (val2-val1)*mu */
-        const float32x4_t r0 = vsubq_f32(val2, val1);
-        const float32x4_t mu = vmulq_f32(vcvtq_f32_s32(frac4), fracOne4);
-        const float32x4_t out = vmlaq_f32(val1, mu, r0);
+        const float32x4_t r0{vsubq_f32(val2, val1)};
+        const float32x4_t mu{vmulq_f32(vcvtq_f32_s32(frac4), fracOne4)};
+        const float32x4_t out{vmlaq_f32(val1, mu, r0)};
 
         vst1q_f32(dst_iter, out);
         dst_iter += 4;
@@ -55,42 +52,38 @@ const ALfloat *Resample_<LerpTag,NEONTag>(const InterpState*, const ALfloat *RES
         frac4 = vandq_s32(frac4, fracMask4);
     }
 
-    /* NOTE: These four elements represent the position *after* the last four
-     * samples, so the lowest element is the next position to resample.
-     */
-    ALsizei pos{vgetq_lane_s32(pos4, 0)};
-    frac = vgetq_lane_s32(frac4, 0);
-
-    while(dst_iter != dst.end())
+    if(dst_iter != dst.end())
     {
-        *(dst_iter++) = lerp(src[pos], src[pos+1], frac * (1.0f/FRACTIONONE));
+        src += static_cast<ALuint>(vgetq_lane_s32(pos4, 0));
+        frac = static_cast<ALuint>(vgetq_lane_s32(frac4, 0));
 
-        frac += increment;
-        pos  += frac>>FRACTIONBITS;
-        frac &= FRACTIONMASK;
+        do {
+            *(dst_iter++) = lerp(src[0], src[1], static_cast<float>(frac) * (1.0f/FRACTIONONE));
+
+            frac += increment;
+            src  += frac>>FRACTIONBITS;
+            frac &= FRACTIONMASK;
+        } while(dst_iter != dst.end());
     }
     return dst.begin();
 }
 
 template<>
 const ALfloat *Resample_<BSincTag,NEONTag>(const InterpState *state, const ALfloat *RESTRICT src,
-    ALsizei frac, ALint increment, const al::span<float> dst)
+    ALuint frac, ALuint increment, const al::span<float> dst)
 {
     const ALfloat *const filter{state->bsinc.filter};
     const float32x4_t sf4{vdupq_n_f32(state->bsinc.sf)};
-    const ALsizei m{state->bsinc.m};
-
-    ASSUME(m > 0);
-    ASSUME(increment > 0);
-    ASSUME(frac >= 0);
+    const size_t m{state->bsinc.m};
 
     src -= state->bsinc.l;
     for(float &out_sample : dst)
     {
         // Calculate the phase index and factor.
 #define FRAC_PHASE_BITDIFF (FRACTIONBITS-BSINC_PHASE_BITS)
-        const ALsizei pi{frac >> FRAC_PHASE_BITDIFF};
-        const ALfloat pf{(frac & ((1<<FRAC_PHASE_BITDIFF)-1)) * (1.0f/(1<<FRAC_PHASE_BITDIFF))};
+        const ALuint pi{frac >> FRAC_PHASE_BITDIFF};
+        const ALfloat pf{static_cast<float>(frac & ((1<<FRAC_PHASE_BITDIFF)-1)) *
+            (1.0f/(1<<FRAC_PHASE_BITDIFF))};
 #undef FRAC_PHASE_BITDIFF
 
         // Apply the scale and phase interpolated filter.
@@ -101,7 +94,7 @@ const ALfloat *Resample_<BSincTag,NEONTag>(const InterpState *state, const ALflo
             const float *scd{fil + m};
             const float *phd{scd + m};
             const float *spd{phd + m};
-            ALsizei td{m >> 2};
+            size_t td{m >> 2};
             size_t j{0u};
 
             do {
@@ -115,8 +108,7 @@ const ALfloat *Resample_<BSincTag,NEONTag>(const InterpState *state, const ALflo
                 j += 4;
             } while(--td);
         }
-        r4 = vaddq_f32(r4, vcombine_f32(vrev64_f32(vget_high_f32(r4)),
-                                        vrev64_f32(vget_low_f32(r4))));
+        r4 = vaddq_f32(r4, vrev64q_f32(r4));
         out_sample = vget_lane_f32(vadd_f32(vget_low_f32(r4), vget_high_f32(r4)), 0);
 
         frac += increment;
@@ -127,10 +119,10 @@ const ALfloat *Resample_<BSincTag,NEONTag>(const InterpState *state, const ALflo
 }
 
 
-static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const ALsizei IrSize,
+static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const ALuint IrSize,
     const HrirArray &Coeffs, const ALfloat left, const ALfloat right)
 {
-    ASSUME(IrSize >= 2);
+    ASSUME(IrSize >= 4);
 
     float32x4_t leftright4;
     {
@@ -140,20 +132,20 @@ static inline void ApplyCoeffs(size_t /*Offset*/, float2 *RESTRICT Values, const
         leftright4 = vcombine_f32(leftright2, leftright2);
     }
 
-    for(ALsizei c{0};c < IrSize;c += 2)
+    for(ALuint c{0};c < IrSize;c += 2)
     {
-        float32x4_t vals = vld1q_f32((float32_t*)&Values[c][0]);
-        float32x4_t coefs = vld1q_f32((float32_t*)&Coeffs[c][0]);
+        float32x4_t vals = vld1q_f32(&Values[c][0]);
+        float32x4_t coefs = vld1q_f32(&Coeffs[c][0]);
 
         vals = vmlaq_f32(vals, coefs, leftright4);
 
-        vst1q_f32((float32_t*)&Values[c][0], vals);
+        vst1q_f32(&Values[c][0], vals);
     }
 }
 
 template<>
 void MixHrtf_<NEONTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     MixHrtfFilter *hrtfparams, const size_t BufferSize)
 {
     MixHrtfBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
@@ -162,7 +154,7 @@ void MixHrtf_<NEONTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
 
 template<>
 void MixHrtfBlend_<NEONTag>(FloatBufferLine &LeftOut, FloatBufferLine &RightOut,
-    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALsizei IrSize,
+    const ALfloat *InSamples, float2 *AccumSamples, const size_t OutPos, const ALuint IrSize,
     const HrtfFilter *oldparams, MixHrtfFilter *newparams, const size_t BufferSize)
 {
     MixHrtfBlendBase<ApplyCoeffs>(LeftOut, RightOut, InSamples, AccumSamples, OutPos, IrSize,
@@ -185,8 +177,8 @@ void Mix_<NEONTag>(const al::span<const float> InSamples, const al::span<FloatBu
     const ALfloat delta{(Counter > 0) ? 1.0f / static_cast<ALfloat>(Counter) : 0.0f};
     const bool reached_target{InSamples.size() >= Counter};
     const auto min_end = reached_target ? InSamples.begin() + Counter : InSamples.end();
-    const auto aligned_end = minz(InSamples.size(), (min_end-InSamples.begin()+3) & ~3) +
-        InSamples.begin();
+    const auto aligned_end = minz(static_cast<uintptr_t>(min_end-InSamples.begin()+3) & ~3u,
+        InSamples.size()) + InSamples.begin();
     for(FloatBufferLine &output : OutBuffer)
     {
         ALfloat *RESTRICT dst{al::assume_aligned<16>(output.data()+OutPos)};
@@ -267,7 +259,7 @@ void MixRow_<NEONTag>(const al::span<float> OutBuffer, const al::span<const floa
 {
     for(const ALfloat gain : Gains)
     {
-        const ALfloat *RESTRICT src{InSamples};
+        const ALfloat *RESTRICT input{InSamples};
         InSamples += InStride;
 
         if(!(std::fabs(gain) > GAIN_SILENCE_THRESHOLD))
@@ -278,14 +270,16 @@ void MixRow_<NEONTag>(const al::span<float> OutBuffer, const al::span<const floa
         {
             const float32x4_t gain4{vdupq_n_f32(gain)};
             do {
-                const float32x4_t val4 = vld1q_f32(src);
+                const float32x4_t val4 = vld1q_f32(input);
                 float32x4_t dry4 = vld1q_f32(out_iter);
                 dry4 = vmlaq_f32(dry4, val4, gain4);
                 vst1q_f32(out_iter, dry4);
-                out_iter += 4; src += 4;
+                out_iter += 4; input += 4;
             } while(--todo);
         }
-        std::transform(out_iter, OutBuffer.end(), src, out_iter,
-            [gain](const ALfloat cur, const ALfloat src) -> ALfloat { return cur + src*gain; });
+
+        auto do_mix = [gain](const float cur, const float src) noexcept -> float
+        { return cur + src*gain; };
+        std::transform(out_iter, OutBuffer.end(), input, out_iter, do_mix);
     }
 }

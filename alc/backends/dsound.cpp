@@ -167,8 +167,8 @@ struct DSoundPlayback final : public BackendBase {
     int mixerProc();
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean reset() override;
-    ALCboolean start() override;
+    bool reset() override;
+    bool start() override;
     void stop() override;
 
     IDirectSound       *mDS{nullptr};
@@ -219,7 +219,7 @@ FORCE_ALIGN int DSoundPlayback::mixerProc()
         return 1;
     }
 
-    ALsizei FrameSize{mDevice->frameSizeFromFmt()};
+    ALuint FrameSize{mDevice->frameSizeFromFmt()};
     DWORD FragSize{mDevice->UpdateSize * FrameSize};
 
     bool Playing{false};
@@ -348,7 +348,7 @@ ALCenum DSoundPlayback::open(const ALCchar *name)
     return ALC_NO_ERROR;
 }
 
-ALCboolean DSoundPlayback::reset()
+bool DSoundPlayback::reset()
 {
     if(mNotifies)
         mNotifies->Release();
@@ -465,11 +465,13 @@ ALCboolean DSoundPlayback::reset()
 retry_open:
         hr = S_OK;
         OutputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-        OutputType.Format.nChannels = mDevice->channelsFromFmt();
-        OutputType.Format.wBitsPerSample = mDevice->bytesFromFmt() * 8;
-        OutputType.Format.nBlockAlign = OutputType.Format.nChannels*OutputType.Format.wBitsPerSample/8;
+        OutputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
+        OutputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
+        OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels *
+            OutputType.Format.wBitsPerSample / 8);
         OutputType.Format.nSamplesPerSec = mDevice->Frequency;
-        OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec*OutputType.Format.nBlockAlign;
+        OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec *
+            OutputType.Format.nBlockAlign;
         OutputType.Format.cbSize = 0;
     }
 
@@ -556,28 +558,28 @@ retry_open:
         if(mPrimaryBuffer)
             mPrimaryBuffer->Release();
         mPrimaryBuffer = nullptr;
-        return ALC_FALSE;
+        return false;
     }
 
     ResetEvent(mNotifyEvent);
     SetDefaultWFXChannelOrder(mDevice);
 
-    return ALC_TRUE;
+    return true;
 }
 
-ALCboolean DSoundPlayback::start()
+bool DSoundPlayback::start()
 {
     try {
         mKillNow.store(false, std::memory_order_release);
         mThread = std::thread{std::mem_fn(&DSoundPlayback::mixerProc), this};
-        return ALC_TRUE;
+        return true;
     }
     catch(std::exception& e) {
         ERR("Failed to start mixing thread: %s\n", e.what());
     }
     catch(...) {
     }
-    return ALC_FALSE;
+    return false;
 }
 
 void DSoundPlayback::stop()
@@ -595,9 +597,9 @@ struct DSoundCapture final : public BackendBase {
     ~DSoundCapture() override;
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean start() override;
+    bool start() override;
     void stop() override;
-    ALCenum captureSamples(void *buffer, ALCuint samples) override;
+    ALCenum captureSamples(al::byte *buffer, ALCuint samples) override;
     ALCuint availableSamples() override;
 
     IDirectSoundCapture *mDSC{nullptr};
@@ -728,11 +730,13 @@ ALCenum DSoundCapture::open(const ALCchar *name)
     }
 
     InputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-    InputType.Format.nChannels = mDevice->channelsFromFmt();
-    InputType.Format.wBitsPerSample = mDevice->bytesFromFmt() * 8;
-    InputType.Format.nBlockAlign = InputType.Format.nChannels*InputType.Format.wBitsPerSample/8;
+    InputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
+    InputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
+    InputType.Format.nBlockAlign = static_cast<WORD>(InputType.Format.nChannels *
+        InputType.Format.wBitsPerSample / 8);
     InputType.Format.nSamplesPerSec = mDevice->Frequency;
-    InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec*InputType.Format.nBlockAlign;
+    InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec *
+        InputType.Format.nBlockAlign;
     InputType.Format.cbSize = 0;
     InputType.Samples.wValidBitsPerSample = InputType.Format.wBitsPerSample;
     if(mDevice->FmtType == DevFmtFloat)
@@ -787,16 +791,16 @@ ALCenum DSoundCapture::open(const ALCchar *name)
     return ALC_NO_ERROR;
 }
 
-ALCboolean DSoundCapture::start()
+bool DSoundCapture::start()
 {
     HRESULT hr{mDSCbuffer->Start(DSCBSTART_LOOPING)};
     if(FAILED(hr))
     {
         ERR("start failed: 0x%08lx\n", hr);
         aluHandleDisconnect(mDevice, "Failure starting capture: 0x%lx", hr);
-        return ALC_FALSE;
+        return false;
     }
-    return ALC_TRUE;
+    return true;
 }
 
 void DSoundCapture::stop()
@@ -809,7 +813,7 @@ void DSoundCapture::stop()
     }
 }
 
-ALCenum DSoundCapture::captureSamples(void *buffer, ALCuint samples)
+ALCenum DSoundCapture::captureSamples(al::byte *buffer, ALCuint samples)
 {
     mRing->read(buffer, samples);
     return ALC_NO_ERROR;
@@ -820,13 +824,13 @@ ALCuint DSoundCapture::availableSamples()
     if(!mDevice->Connected.load(std::memory_order_acquire))
         return static_cast<ALCuint>(mRing->readSpace());
 
-    ALsizei FrameSize{mDevice->frameSizeFromFmt()};
+    ALuint FrameSize{mDevice->frameSizeFromFmt()};
     DWORD BufferBytes{mBufferBytes};
     DWORD LastCursor{mCursor};
 
-    DWORD ReadCursor;
-    void *ReadPtr1, *ReadPtr2;
-    DWORD ReadCnt1,  ReadCnt2;
+    DWORD ReadCursor{};
+    void *ReadPtr1{}, *ReadPtr2{};
+    DWORD ReadCnt1{},  ReadCnt2{};
     HRESULT hr{mDSCbuffer->GetCurrentPosition(nullptr, &ReadCursor)};
     if(SUCCEEDED(hr))
     {

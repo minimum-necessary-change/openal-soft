@@ -41,14 +41,17 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 
-#include <vector>
-#include <string>
 #include <algorithm>
+#include <cstdio>
+#include <string>
+#include <utility>
 
-#include "alcmain.h"
+#include "alfstream.h"
+#include "alstring.h"
+#include "compat.h"
 #include "logging.h"
 #include "strutils.h"
-#include "compat.h"
+#include "vector.h"
 
 
 namespace {
@@ -169,7 +172,7 @@ void LoadConfigFromFile(std::istream &f)
             *endsection = 0;
 
             curSection.clear();
-            if(strcasecmp(section, "general") != 0)
+            if(al::strcasecmp(section, "general") != 0)
             {
                 do {
                     char *nextp = std::strchr(section, '%');
@@ -189,7 +192,7 @@ void LoadConfigFromFile(std::istream &f)
                         (section[2] >= 'a' && section[2] <= 'f') ||
                         (section[2] >= 'A' && section[2] <= 'F')))
                     {
-                        unsigned char b = 0;
+                        int b{0};
                         if(section[1] >= '0' && section[1] <= '9')
                             b = (section[1]-'0') << 4;
                         else if(section[1] >= 'a' && section[1] <= 'f')
@@ -359,7 +362,7 @@ void ReadALConfig()
             else fname += "alsoft.conf";
 
             TRACE("Loading config %s...\n", fname.c_str());
-            al::ifstream f{fname};
+            f = al::ifstream{fname};
             if(f.is_open())
                 LoadConfigFromFile(f);
         }
@@ -376,7 +379,7 @@ void ReadALConfig()
         if((configURL=CFBundleCopyResourceURL(mainBundle, CFSTR(".alsoftrc"), CFSTR(""), nullptr)) &&
            CFURLGetFileSystemRepresentation(configURL, true, fileName, sizeof(fileName)))
         {
-            al::ifstream f{reinterpret_cast<char*>(fileName)};
+            f = al::ifstream{reinterpret_cast<char*>(fileName)};
             if(f.is_open())
                 LoadConfigFromFile(f);
         }
@@ -390,7 +393,7 @@ void ReadALConfig()
         else fname += ".alsoftrc";
 
         TRACE("Loading config %s...\n", fname.c_str());
-        al::ifstream f{fname};
+        f = al::ifstream{fname};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -414,7 +417,7 @@ void ReadALConfig()
     if(!fname.empty())
     {
         TRACE("Loading config %s...\n", fname.c_str());
-        al::ifstream f{fname};
+        f = al::ifstream{fname};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -426,7 +429,7 @@ void ReadALConfig()
         else ppath += "alsoft.conf";
 
         TRACE("Loading config %s...\n", ppath.c_str());
-        al::ifstream f{ppath};
+        f = al::ifstream{ppath};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -434,7 +437,7 @@ void ReadALConfig()
     if(auto confname = al::getenv("ALSOFT_CONF"))
     {
         TRACE("Loading config %s...\n", confname->c_str());
-        al::ifstream f{*confname};
+        f = al::ifstream{*confname};
         if(f.is_open())
             LoadConfigFromFile(f);
     }
@@ -447,7 +450,7 @@ const char *GetConfigValue(const char *devName, const char *blockName, const cha
         return def;
 
     std::string key;
-    if(blockName && strcasecmp(blockName, "general") != 0)
+    if(blockName && al::strcasecmp(blockName, "general") != 0)
     {
         key = blockName;
         if(devName)
@@ -532,8 +535,8 @@ al::optional<bool> ConfigValueBool(const char *devName, const char *blockName, c
     if(!val[0]) return al::nullopt;
 
     return al::make_optional(
-        strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0 ||
-        strcasecmp(val, "on") == 0 || atoi(val) != 0);
+        al::strcasecmp(val, "true") == 0 || al::strcasecmp(val, "yes") == 0 ||
+        al::strcasecmp(val, "on") == 0 || atoi(val) != 0);
 }
 
 int GetConfigValueBool(const char *devName, const char *blockName, const char *keyName, int def)
@@ -541,6 +544,6 @@ int GetConfigValueBool(const char *devName, const char *blockName, const char *k
     const char *val = GetConfigValue(devName, blockName, keyName, "");
 
     if(!val[0]) return def != 0;
-    return (strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0 ||
-            strcasecmp(val, "on") == 0 || atoi(val) != 0);
+    return (al::strcasecmp(val, "true") == 0 || al::strcasecmp(val, "yes") == 0 ||
+            al::strcasecmp(val, "on") == 0 || atoi(val) != 0);
 }

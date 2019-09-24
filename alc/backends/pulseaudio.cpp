@@ -278,8 +278,8 @@ size_t ChannelFromPulse(pa_channel_position_t chan)
 
 void SetChannelOrderFromMap(ALCdevice *device, const pa_channel_map &chanmap)
 {
-    device->RealOut.ChannelIndex.fill(-1);
-    for(int i{0};i < chanmap.channels;++i)
+    device->RealOut.ChannelIndex.fill(INVALID_CHANNEL_INDEX);
+    for(ALuint i{0};i < chanmap.channels;++i)
         device->RealOut.ChannelIndex[ChannelFromPulse(chanmap.map[i])] = i;
 }
 
@@ -447,10 +447,8 @@ struct DevMap {
 
 bool checkName(const al::vector<DevMap> &list, const std::string &name)
 {
-    return std::find_if(list.cbegin(), list.cend(),
-        [&name](const DevMap &entry) -> bool
-        { return entry.name == name; }
-    ) != list.cend();
+    auto match_name = [&name](const DevMap &entry) -> bool { return entry.name == name; };
+    return std::find_if(list.cbegin(), list.cend(), match_name) != list.cend();
 }
 
 al::vector<DevMap> PlaybackDevices;
@@ -484,7 +482,7 @@ pa_stream *pulse_connect_stream(const char *device_name, std::unique_lock<std::m
     {
         if(!PA_STREAM_IS_GOOD(state))
         {
-            int err{pa_context_errno(context)};
+            err = pa_context_errno(context);
             pa_stream_unref(stream);
             throw al::backend_exception{ALC_INVALID_VALUE, "%s did not get ready (%s)", stream_id,
                 pa_strerror(err)};
@@ -666,8 +664,8 @@ struct PulsePlayback final : public BackendBase {
     void streamMovedCallback(pa_stream *stream);
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean reset() override;
-    ALCboolean start() override;
+    bool reset() override;
+    bool start() override;
     void stop() override;
     ClockLatency getClockLatency() override;
     void lock() override;
@@ -743,7 +741,7 @@ void PulsePlayback::streamWriteCallbackC(pa_stream *stream, size_t nbytes, void 
 void PulsePlayback::streamWriteCallback(pa_stream *stream, size_t nbytes)
 {
     void *buf{pa_xmalloc(nbytes)};
-    aluMixData(mDevice, buf, nbytes/mFrameSize);
+    aluMixData(mDevice, buf, static_cast<ALuint>(nbytes/mFrameSize));
 
     int ret{pa_stream_write(stream, buf, nbytes, pa_xfree, 0, PA_SEEK_RELATIVE)};
     if UNLIKELY(ret != PA_OK)
@@ -756,7 +754,7 @@ void PulsePlayback::sinkInfoCallbackC(pa_context *context, const pa_sink_info *i
 void PulsePlayback::sinkInfoCallback(pa_context*, const pa_sink_info *info, int eol)
 {
     struct ChannelMap {
-        DevFmtChannels chans;
+        DevFmtChannels fmt;
         pa_channel_map map;
     };
     static constexpr std::array<ChannelMap,7> chanmaps{{
@@ -775,14 +773,14 @@ void PulsePlayback::sinkInfoCallback(pa_context*, const pa_sink_info *info, int 
         return;
     }
 
-    auto chanmap = std::find_if(chanmaps.cbegin(), chanmaps.cend(),
+    auto chaniter = std::find_if(chanmaps.cbegin(), chanmaps.cend(),
         [info](const ChannelMap &chanmap) -> bool
         { return pa_channel_map_superset(&info->channel_map, &chanmap.map); }
     );
-    if(chanmap != chanmaps.cend())
+    if(chaniter != chanmaps.cend())
     {
         if(!mDevice->Flags.get<ChannelsRequest>())
-            mDevice->FmtChans = chanmap->chans;
+            mDevice->FmtChans = chaniter->fmt;
     }
     else
     {
@@ -864,7 +862,7 @@ ALCenum PulsePlayback::open(const ALCchar *name)
         BackendType::Playback);
 
     pa_stream_set_moved_callback(mStream, &PulsePlayback::streamMovedCallbackC, this);
-    mFrameSize = pa_frame_size(pa_stream_get_sample_spec(mStream));
+    mFrameSize = static_cast<ALuint>(pa_frame_size(pa_stream_get_sample_spec(mStream)));
 
     mDeviceName = pa_stream_get_device_name(mStream);
     if(!dev_name)
@@ -879,7 +877,7 @@ ALCenum PulsePlayback::open(const ALCchar *name)
     return ALC_NO_ERROR;
 }
 
-ALCboolean PulsePlayback::reset()
+bool PulsePlayback::reset()
 {
     std::unique_lock<std::mutex> plock{pulse_lock};
 
@@ -970,15 +968,16 @@ ALCboolean PulsePlayback::reset()
             break;
     }
     mSpec.rate = mDevice->Frequency;
-    mSpec.channels = mDevice->channelsFromFmt();
+    mSpec.channels = static_cast<uint8_t>(mDevice->channelsFromFmt());
     if(pa_sample_spec_valid(&mSpec) == 0)
         throw al::backend_exception{ALC_INVALID_VALUE, "Invalid sample spec"};
 
-    mAttr.maxlength = -1;
-    mAttr.tlength = mDevice->BufferSize * pa_frame_size(&mSpec);
-    mAttr.prebuf = 0;
-    mAttr.minreq = mDevice->UpdateSize * pa_frame_size(&mSpec);
-    mAttr.fragsize = -1;
+    const ALuint frame_size{static_cast<ALuint>(pa_frame_size(&mSpec))};
+    mAttr.maxlength = ~0u;
+    mAttr.tlength = mDevice->BufferSize * frame_size;
+    mAttr.prebuf = 0u;
+    mAttr.minreq = mDevice->UpdateSize * frame_size;
+    mAttr.fragsize = ~0u;
 
     mStream = pulse_connect_stream(mDeviceName.c_str(), plock, mContext, flags, &mAttr, &mSpec,
         &chanmap, BackendType::Playback);
@@ -987,7 +986,7 @@ ALCboolean PulsePlayback::reset()
     pa_stream_set_moved_callback(mStream, &PulsePlayback::streamMovedCallbackC, this);
 
     mSpec = *(pa_stream_get_sample_spec(mStream));
-    mFrameSize = pa_frame_size(&mSpec);
+    mFrameSize = static_cast<ALuint>(pa_frame_size(&mSpec));
 
     if(mDevice->Frequency != mSpec.rate)
     {
@@ -1000,9 +999,9 @@ ALCboolean PulsePlayback::reset()
         const ALuint buflen{static_cast<ALuint>(clampd(scale*mDevice->BufferSize + 0.5, perlen*2,
             std::numeric_limits<int>::max()/mFrameSize))};
 
-        mAttr.maxlength = -1;
+        mAttr.maxlength = ~0u;
         mAttr.tlength = buflen * mFrameSize;
-        mAttr.prebuf = 0;
+        mAttr.prebuf = 0u;
         mAttr.minreq = perlen * mFrameSize;
 
         op = pa_stream_set_buffer_attr(mStream, &mAttr, stream_success_callback, nullptr);
@@ -1031,10 +1030,10 @@ ALCboolean PulsePlayback::reset()
                 len, mAttr.prebuf, mDevice->BufferSize);
     }
 
-    return ALC_TRUE;
+    return true;
 }
 
-ALCboolean PulsePlayback::start()
+bool PulsePlayback::start()
 {
     std::unique_lock<std::mutex> plock{pulse_lock};
 
@@ -1042,7 +1041,7 @@ ALCboolean PulsePlayback::start()
     pa_operation *op{pa_stream_cork(mStream, 0, stream_success_callback, nullptr)};
     wait_for_operation(op, plock);
 
-    return ALC_TRUE;
+    return true;
 }
 
 void PulsePlayback::stop()
@@ -1109,9 +1108,9 @@ struct PulseCapture final : public BackendBase {
     void streamMovedCallback(pa_stream *stream);
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean start() override;
+    bool start() override;
     void stop() override;
-    ALCenum captureSamples(ALCvoid *buffer, ALCuint samples) override;
+    ALCenum captureSamples(al::byte *buffer, ALCuint samples) override;
     ALCuint availableSamples() override;
     ClockLatency getClockLatency() override;
     void lock() override;
@@ -1268,18 +1267,17 @@ ALCenum PulseCapture::open(const ALCchar *name)
                 DevFmtTypeString(mDevice->FmtType)};
     }
     mSpec.rate = mDevice->Frequency;
-    mSpec.channels = mDevice->channelsFromFmt();
+    mSpec.channels = static_cast<uint8_t>(mDevice->channelsFromFmt());
     if(pa_sample_spec_valid(&mSpec) == 0)
         throw al::backend_exception{ALC_INVALID_VALUE, "Invalid sample format"};
 
-    ALuint samples{mDevice->BufferSize};
-    samples = maxu(samples, 100 * mDevice->Frequency / 1000);
-
-    mAttr.minreq = -1;
-    mAttr.prebuf = -1;
-    mAttr.maxlength = samples * pa_frame_size(&mSpec);
-    mAttr.tlength = -1;
-    mAttr.fragsize = minu(samples, 50*mDevice->Frequency/1000) * pa_frame_size(&mSpec);
+    const ALuint frame_size{static_cast<ALuint>(pa_frame_size(&mSpec))};
+    const ALuint samples{maxu(mDevice->BufferSize, 100 * mDevice->Frequency / 1000)};
+    mAttr.minreq = ~0u;
+    mAttr.prebuf = ~0u;
+    mAttr.maxlength = samples * frame_size;
+    mAttr.tlength = ~0u;
+    mAttr.fragsize = minu(samples, 50*mDevice->Frequency/1000) * frame_size;
 
     pa_stream_flags_t flags{PA_STREAM_START_CORKED | PA_STREAM_ADJUST_LATENCY};
     if(!GetConfigValueBool(nullptr, "pulse", "allow-moves", 1))
@@ -1303,12 +1301,12 @@ ALCenum PulseCapture::open(const ALCchar *name)
     return ALC_NO_ERROR;
 }
 
-ALCboolean PulseCapture::start()
+bool PulseCapture::start()
 {
     std::unique_lock<std::mutex> plock{pulse_lock};
     pa_operation *op{pa_stream_cork(mStream, 0, stream_success_callback, nullptr)};
     wait_for_operation(op, plock);
-    return ALC_TRUE;
+    return true;
 }
 
 void PulseCapture::stop()
@@ -1318,20 +1316,20 @@ void PulseCapture::stop()
     wait_for_operation(op, plock);
 }
 
-ALCenum PulseCapture::captureSamples(ALCvoid *buffer, ALCuint samples)
+ALCenum PulseCapture::captureSamples(al::byte *buffer, ALCuint samples)
 {
-    al::span<al::byte> dstbuf{static_cast<al::byte*>(buffer), samples * pa_frame_size(&mSpec)};
+    al::span<al::byte> dstbuf{buffer, samples * pa_frame_size(&mSpec)};
 
     /* Capture is done in fragment-sized chunks, so we loop until we get all
      * that's available */
-    mLastReadable -= dstbuf.size();
-    std::lock_guard<std::mutex> _{pulse_lock};
+    mLastReadable -= static_cast<ALCuint>(dstbuf.size());
     while(!dstbuf.empty())
     {
         if(mCapBuffer.empty())
         {
             if UNLIKELY(!mDevice->Connected.load(std::memory_order_acquire))
                 break;
+            std::lock_guard<std::mutex> _{pulse_lock};
             const pa_stream_state_t state{pa_stream_get_state(mStream)};
             if UNLIKELY(!PA_STREAM_IS_GOOD(state))
             {
@@ -1364,6 +1362,7 @@ ALCenum PulseCapture::captureSamples(ALCvoid *buffer, ALCuint samples)
 
         if(mCapBuffer.empty())
         {
+            std::lock_guard<std::mutex> _{pulse_lock};
             pa_stream_drop(mStream);
             mCapLen = 0;
         }
@@ -1384,8 +1383,9 @@ ALCuint PulseCapture::availableSamples()
         size_t got{pa_stream_readable_size(mStream)};
         if(static_cast<ssize_t>(got) < 0)
         {
-            ERR("pa_stream_readable_size() failed: %s\n", pa_strerror(got));
-            aluHandleDisconnect(mDevice, "Failed getting readable size: %s", pa_strerror(got));
+            const char *err{pa_strerror(static_cast<int>(got))};
+            ERR("pa_stream_readable_size() failed: %s\n", err);
+            aluHandleDisconnect(mDevice, "Failed getting readable size: %s", err);
         }
         else
         {
@@ -1396,7 +1396,7 @@ ALCuint PulseCapture::availableSamples()
 
     readable = std::min<size_t>(readable, std::numeric_limits<ALCuint>::max());
     mLastReadable = std::max(mLastReadable, static_cast<ALCuint>(readable));
-    return mLastReadable / pa_frame_size(&mSpec);
+    return mLastReadable / static_cast<ALCuint>(pa_frame_size(&mSpec));
 }
 
 

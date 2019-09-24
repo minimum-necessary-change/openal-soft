@@ -26,10 +26,10 @@ struct HrtfHandle;
 
 
 struct HrtfEntry {
-    RefCount ref;
+    RefCount mRef;
 
     ALuint sampleRate;
-    ALsizei irSize;
+    ALuint irSize;
 
     struct Field {
         ALfloat distance;
@@ -38,7 +38,7 @@ struct HrtfEntry {
     /* NOTE: Fields are stored *backwards*. field[0] is the farthest field, and
      * field[fdCount-1] is the nearest.
      */
-    ALsizei fdCount;
+    ALuint fdCount;
     const Field *field;
 
     struct Elevation {
@@ -78,22 +78,15 @@ struct HrtfFilter {
 
 struct DirectHrtfState {
     /* HRTF filter state for dry buffer content */
-    ALsizei IrSize{0};
-    struct ChanData {
-        alignas(16) HrirArray Values;
-        alignas(16) HrirArray Coeffs;
-    };
-    al::FlexArray<ChanData> Chan;
+    ALuint IrSize{0};
+    alignas(16) HrirArray Values;
+    al::FlexArray<HrirArray,16> Coeffs;
 
-    DirectHrtfState(size_t numchans) : Chan{numchans} { }
-    DirectHrtfState(const DirectHrtfState&) = delete;
-    DirectHrtfState& operator=(const DirectHrtfState&) = delete;
+    DirectHrtfState(size_t numchans) : Coeffs{numchans} { }
 
     static std::unique_ptr<DirectHrtfState> Create(size_t num_chans);
-    static constexpr size_t Sizeof(size_t numchans) noexcept
-    { return al::FlexArray<ChanData>::Sizeof(numchans, offsetof(DirectHrtfState, Chan)); }
 
-    DEF_PLACE_NEWDEL()
+    DEF_FAM_NEWDEL(DirectHrtfState, Coeffs)
 };
 
 struct AngularPoint {

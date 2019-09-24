@@ -11,6 +11,23 @@
 #include <utility>
 
 
+#ifdef _MSC_VER
+#define DIAGNOSTIC_PUSH __pragma(warning(push))
+#define GNUDIAGNOSTIC(x)
+#define MVSDIAGNOSTIC(...) __pragma(__VA_ARGS__)
+#define DIAGNOSTIC_POP __pragma(warning(pop))
+#elif defined(__GNUC__) || defined(__clang__)
+#define DIAGNOSTIC_PUSH _Pragma("GCC diagnostic push")
+#define GNUDIAGNOSTIC(x) _Pragma(x)
+#define MVSDIAGNOSTIC(...)
+#define DIAGNOSTIC_POP _Pragma("GCC diagnostic push")
+#else
+#define DIAGNOSTIC_PUSH
+#define GNUDIAGNOSTIC(x)
+#define MVSDIAGNOSTIC(...)
+#define DIAGNOSTIC_POP
+#endif
+
 void *al_malloc(size_t alignment, size_t size);
 void *al_calloc(size_t alignment, size_t size);
 void al_free(void *ptr) noexcept;
@@ -27,43 +44,55 @@ void al_free(void *ptr) noexcept;
 
 #define DEF_PLACE_NEWDEL()                                                    \
     void *operator new(size_t /*size*/, void *ptr) noexcept { return ptr; }   \
-    void operator delete(void *block) noexcept { al_free(block); }            \
-    void operator delete(void* /*block*/, void* /*ptr*/) noexcept { }
+    void operator delete(void *block, void*) noexcept { al_free(block); }     \
+    void operator delete(void *block) noexcept { al_free(block); }
+
+struct FamCount { size_t mCount; };
+
+#define DEF_FAM_NEWDEL(T, FamMem)                                             \
+    static constexpr size_t Sizeof(size_t count) noexcept                     \
+    { return decltype(FamMem)::Sizeof(count, offsetof(T, FamMem)); }          \
+                                                                              \
+    void *operator new(size_t /*size*/, FamCount fam)                         \
+    {                                                                         \
+        if(void *ret{al_malloc(alignof(T), T::Sizeof(fam.mCount))})           \
+            return ret;                                                       \
+        throw std::bad_alloc();                                               \
+    }                                                                         \
+    void operator delete(void *block, FamCount) { al_free(block); }           \
+    void operator delete(void *block) noexcept { al_free(block); }
+
 
 namespace al {
 
 #define REQUIRES(...) typename std::enable_if<(__VA_ARGS__),int>::type = 0
 
-template<typename T, size_t alignment=alignof(T)>
-struct allocator : public std::allocator<T> {
-    using size_type = size_t;
-    using pointer = T*;
-    using const_pointer = const T*;
+template<typename T, std::size_t alignment=alignof(T)>
+struct allocator {
+    using value_type = T;
+    using is_always_equal = std::true_type;
 
     template<typename U>
     struct rebind {
-        using other = allocator<U, alignment>;
+        using other = allocator<U, (alignment<alignof(U))?alignof(U):alignment>;
     };
 
-    pointer allocate(size_type n, const void* = nullptr)
+    allocator() = default;
+    template<typename U, std::size_t N>
+    constexpr allocator(const allocator<U,N>&) noexcept { }
+
+    T *allocate(std::size_t n)
     {
-        if(n > std::numeric_limits<size_t>::max() / sizeof(T))
-            throw std::bad_alloc();
-
-        void *ret{al_malloc(alignment, n*sizeof(T))};
-        if(!ret) throw std::bad_alloc();
-        return static_cast<pointer>(ret);
+        if(n > std::numeric_limits<std::size_t>::max()/sizeof(T)) throw std::bad_alloc();
+        if(auto p = static_cast<T*>(al_malloc(alignment, n*sizeof(T)))) return p;
+        throw std::bad_alloc();
     }
-
-    void deallocate(pointer p, size_type)
-    { al_free(p); }
-
-    allocator() : std::allocator<T>() { }
-    allocator(const allocator &a) : std::allocator<T>(a) { }
-    template<class U>
-    allocator(const allocator<U,alignment> &a) : std::allocator<T>(a)
-    { }
+    void deallocate(T *p, std::size_t) noexcept { al_free(p); }
 };
+template<typename T, std::size_t N, typename U, std::size_t M>
+bool operator==(const allocator<T,N>&, const allocator<U,M>&) noexcept { return true; }
+template<typename T, std::size_t N, typename U, std::size_t M>
+bool operator!=(const allocator<T,N>&, const allocator<U,M>&) noexcept { return false; }
 
 template<size_t alignment, typename T>
 inline T* assume_aligned(T *ptr) noexcept
@@ -80,8 +109,14 @@ inline T* assume_aligned(T *ptr) noexcept
 #endif
 }
 
+/* At least VS 2015 complains that 'ptr' is unused when the given type's
+ * destructor is trivial (a no-op). So disable that warning for this call.
+ */
+DIAGNOSTIC_PUSH
+MVSDIAGNOSTIC(warning(disable : 4100))
 template<typename T>
 inline void destroy_at(T *ptr) { ptr->~T(); }
+DIAGNOSTIC_POP
 
 template<typename T>
 inline void destroy(T first, const T end)
@@ -221,7 +256,11 @@ struct FlexArray {
 
 
     const index_type mSize;
+DIAGNOSTIC_PUSH
+GNUDIAGNOSTIC("GCC diagnostic ignored \"-Wpedantic\"")
+MVSDIAGNOSTIC(warning(disable : 4200))
     alignas(alignment) element_type mArray[0];
+DIAGNOSTIC_POP
 
     static std::unique_ptr<FlexArray> Create(index_type count)
     {

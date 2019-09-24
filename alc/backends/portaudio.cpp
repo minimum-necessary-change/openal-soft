@@ -81,8 +81,8 @@ struct PortPlayback final : public BackendBase {
         const PaStreamCallbackTimeInfo *timeInfo, const PaStreamCallbackFlags statusFlags);
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean reset() override;
-    ALCboolean start() override;
+    bool reset() override;
+    bool start() override;
     void stop() override;
 
     PaStream *mStream{nullptr};
@@ -114,7 +114,7 @@ int PortPlayback::writeCallback(const void*, void *outputBuffer,
     const PaStreamCallbackFlags)
 {
     lock();
-    aluMixData(mDevice, outputBuffer, framesPerBuffer);
+    aluMixData(mDevice, outputBuffer, static_cast<ALuint>(framesPerBuffer));
     unlock();
     return 0;
 }
@@ -179,10 +179,10 @@ retry_open:
 
 }
 
-ALCboolean PortPlayback::reset()
+bool PortPlayback::reset()
 {
     const PaStreamInfo *streamInfo{Pa_GetStreamInfo(mStream)};
-    mDevice->Frequency = streamInfo->sampleRate;
+    mDevice->Frequency = static_cast<ALuint>(streamInfo->sampleRate);
     mDevice->UpdateSize = mUpdateSize;
 
     if(mParams.sampleFormat == paInt8)
@@ -198,7 +198,7 @@ ALCboolean PortPlayback::reset()
     else
     {
         ERR("Unexpected sample format: 0x%lx\n", mParams.sampleFormat);
-        return ALC_FALSE;
+        return false;
     }
 
     if(mParams.channelCount == 2)
@@ -208,22 +208,22 @@ ALCboolean PortPlayback::reset()
     else
     {
         ERR("Unexpected channel count: %u\n", mParams.channelCount);
-        return ALC_FALSE;
+        return false;
     }
     SetDefaultChannelOrder(mDevice);
 
-    return ALC_TRUE;
+    return true;
 }
 
-ALCboolean PortPlayback::start()
+bool PortPlayback::start()
 {
     PaError err{Pa_StartStream(mStream)};
     if(err != paNoError)
     {
         ERR("Pa_StartStream() returned an error: %s\n", Pa_GetErrorText(err));
-        return ALC_FALSE;
+        return false;
     }
-    return ALC_TRUE;
+    return true;
 }
 
 void PortPlayback::stop()
@@ -245,9 +245,9 @@ struct PortCapture final : public BackendBase {
         const PaStreamCallbackTimeInfo *timeInfo, const PaStreamCallbackFlags statusFlags);
 
     ALCenum open(const ALCchar *name) override;
-    ALCboolean start() override;
+    bool start() override;
     void stop() override;
-    ALCenum captureSamples(ALCvoid *buffer, ALCuint samples) override;
+    ALCenum captureSamples(al::byte *buffer, ALCuint samples) override;
     ALCuint availableSamples() override;
 
     PaStream *mStream{nullptr};
@@ -293,7 +293,7 @@ ALCenum PortCapture::open(const ALCchar *name)
 
     ALuint samples{mDevice->BufferSize};
     samples = maxu(samples, 100 * mDevice->Frequency / 1000);
-    ALsizei frame_size{mDevice->frameSizeFromFmt()};
+    ALuint frame_size{mDevice->frameSizeFromFmt()};
 
     mRing = CreateRingBuffer(samples, frame_size, false);
     if(!mRing) return ALC_INVALID_VALUE;
@@ -326,7 +326,7 @@ ALCenum PortCapture::open(const ALCchar *name)
             ERR("%s samples not supported\n", DevFmtTypeString(mDevice->FmtType));
             return ALC_INVALID_VALUE;
     }
-    mParams.channelCount = mDevice->channelsFromFmt();
+    mParams.channelCount = static_cast<int>(mDevice->channelsFromFmt());
 
     PaError err{Pa_OpenStream(&mStream, &mParams, nullptr, mDevice->Frequency,
         paFramesPerBufferUnspecified, paNoFlag, &PortCapture::readCallbackC, this)};
@@ -341,15 +341,15 @@ ALCenum PortCapture::open(const ALCchar *name)
 }
 
 
-ALCboolean PortCapture::start()
+bool PortCapture::start()
 {
     PaError err{Pa_StartStream(mStream)};
     if(err != paNoError)
     {
         ERR("Error starting stream: %s\n", Pa_GetErrorText(err));
-        return ALC_FALSE;
+        return false;
     }
-    return ALC_TRUE;
+    return true;
 }
 
 void PortCapture::stop()
@@ -361,9 +361,9 @@ void PortCapture::stop()
 
 
 ALCuint PortCapture::availableSamples()
-{ return mRing->readSpace(); }
+{ return static_cast<ALCuint>(mRing->readSpace()); }
 
-ALCenum PortCapture::captureSamples(ALCvoid *buffer, ALCuint samples)
+ALCenum PortCapture::captureSamples(al::byte *buffer, ALCuint samples)
 {
     mRing->read(buffer, samples);
     return ALC_NO_ERROR;
